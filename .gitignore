@@ -1,0 +1,8 @@
+.DS_Store
+.build/
+switchboard
+switchboard.new
+*.app/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
