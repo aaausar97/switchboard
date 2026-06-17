@@ -5,9 +5,14 @@ import Cocoa
 class MenuBarController: NSObject, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private let audioRecorder = SystemAudioRecorder()
+    private let audioDownloader = AudioDownloader.shared
     let altTabManager = AltTabManager()
     private var recordingMenuItem: NSMenuItem!
     private var durationMenuItem: NSMenuItem!
+    private var downloadClipboardMenuItem: NSMenuItem!
+    private var downloadURLMenuItem: NSMenuItem!
+    private var downloadProgressMenuItem: NSMenuItem!
+    private var cancelDownloadMenuItem: NSMenuItem!
     private var updateTimer: Timer?
     private var hideAppsMenuItem: NSMenuItem?
 
@@ -45,9 +50,9 @@ class MenuBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        // Audio Recorder
-        let hdr2 = NSMenuItem(title: "AUDIO RECORDER", action: nil, keyEquivalent: "")
-        hdr2.attributedTitle = NSAttributedString(string: "AUDIO RECORDER",
+        // Audio
+        let hdr2 = NSMenuItem(title: "AUDIO", action: nil, keyEquivalent: "")
+        hdr2.attributedTitle = NSAttributedString(string: "AUDIO",
             attributes: [.font: NSFont.systemFont(ofSize: 11, weight: .bold), .foregroundColor: NSColor.secondaryLabelColor])
         menu.addItem(hdr2)
 
@@ -56,6 +61,20 @@ class MenuBarController: NSObject, NSMenuDelegate {
 
         durationMenuItem = NSMenuItem(title: "  00:00", action: nil, keyEquivalent: "")
         durationMenuItem.isHidden = true; menu.addItem(durationMenuItem)
+
+        downloadClipboardMenuItem = NSMenuItem(title: "  ⬇︎  Download from Clipboard", action: #selector(downloadFromClipboard), keyEquivalent: "d")
+        downloadClipboardMenuItem.target = self; menu.addItem(downloadClipboardMenuItem)
+
+        downloadURLMenuItem = NSMenuItem(title: "  ⬇︎  Enter URL…", action: #selector(downloadFromURL), keyEquivalent: "D")
+        downloadURLMenuItem.target = self; menu.addItem(downloadURLMenuItem)
+
+        downloadProgressMenuItem = NSMenuItem(title: "  ⬇︎  Downloading…", action: nil, keyEquivalent: "")
+        downloadProgressMenuItem.isHidden = true; menu.addItem(downloadProgressMenuItem)
+
+        cancelDownloadMenuItem = NSMenuItem(title: "  ✕  Cancel Download", action: #selector(cancelDownload), keyEquivalent: "")
+        cancelDownloadMenuItem.target = self
+        cancelDownloadMenuItem.isHidden = true
+        menu.addItem(cancelDownloadMenuItem)
 
         let openFolder = NSMenuItem(title: "  📁 Open Recordings Folder", action: #selector(openRecordings), keyEquivalent: "")
         openFolder.target = self; menu.addItem(openFolder)
@@ -73,6 +92,26 @@ class MenuBarController: NSObject, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         hideAppsMenuItem?.submenu = buildHideAppsMenu()
+        updateDownloadMenuState()
+    }
+
+    private func updateDownloadMenuState() {
+        guard !audioDownloader.isDownloading else { return }
+
+        if let url = clipboardURLString() {
+            downloadClipboardMenuItem.isEnabled = true
+            downloadClipboardMenuItem.toolTip = url
+            if let host = URL(string: url)?.host {
+                let preview = host.count > 28 ? String(host.prefix(25)) + "…" : host
+                downloadClipboardMenuItem.title = "  ⬇︎  Download from Clipboard  ·  \(preview)"
+            } else {
+                downloadClipboardMenuItem.title = "  ⬇︎  Download from Clipboard"
+            }
+        } else {
+            downloadClipboardMenuItem.isEnabled = false
+            downloadClipboardMenuItem.title = "  ⬇︎  Download from Clipboard"
+            downloadClipboardMenuItem.toolTip = "Copy a link first, or use Enter URL…"
+        }
     }
 
     private func buildHideAppsMenu() -> NSMenu {
@@ -112,15 +151,39 @@ class MenuBarController: NSObject, NSMenuDelegate {
         if AppState.shared.isRecording {
             audioRecorder.stopRecording()
             recordingMenuItem.title = "  ⏺  Record System Audio"
-            durationMenuItem.isHidden = true; statusItem.button?.title = ""
+            recordingMenuItem.isEnabled = true
+            durationMenuItem.isHidden = true
+            statusItem.button?.title = ""
             let image = NSImage(systemSymbolName: "wrench.and.screwdriver.fill", accessibilityDescription: "Switchboard")
             image?.isTemplate = true
             statusItem.button?.image = image
         } else {
+            SwitchboardPermissions.requestScreenRecordingForThumbnails()
+            // Show feedback immediately while ScreenCaptureKit spins up (can take ~300ms).
+            recordingMenuItem.title = "  ⏺  Starting…"
+            recordingMenuItem.isEnabled = false
             statusItem.button?.image = nil
-            audioRecorder.startRecording { [weak self] in self?.tick() }
-            recordingMenuItem.title = "  ⏹  Stop Recording"
-            durationMenuItem.isHidden = false
+            statusItem.button?.title = "⏺"
+
+            audioRecorder.startRecording(
+                onStart: { [weak self] in
+                    guard let self else { return }
+                    self.recordingMenuItem.title = "  ⏹  Stop Recording"
+                    self.recordingMenuItem.isEnabled = true
+                    self.durationMenuItem.isHidden = false
+                    self.tick()
+                },
+                onError: { [weak self] in
+                    guard let self else { return }
+                    // Restore idle state — screen recording permission may be missing.
+                    self.recordingMenuItem.title = "  ⏺  Record System Audio"
+                    self.recordingMenuItem.isEnabled = true
+                    self.statusItem.button?.title = ""
+                    let image = NSImage(systemSymbolName: "wrench.and.screwdriver.fill", accessibilityDescription: "Switchboard")
+                    image?.isTemplate = true
+                    self.statusItem.button?.image = image
+                }
+            )
         }
     }
 
@@ -131,16 +194,145 @@ class MenuBarController: NSObject, NSMenuDelegate {
         NSWorkspace.shared.open(dir)
     }
 
+    @objc private func downloadFromClipboard() {
+        if let url = clipboardURLString() {
+            beginDownload(urlString: url)
+        } else {
+            downloadFromURL()
+        }
+    }
+
+    @objc private func downloadFromURL() {
+        let alert = NSAlert()
+        alert.messageText = "Download Audio"
+        alert.informativeText = "Paste a URL to a YouTube video, SoundCloud track, direct audio file, or other supported media page.\n\nSupported: YouTube, Vimeo, SoundCloud, Bandcamp, direct .mp3/.m4a, and more.\n\nRequires: brew install yt-dlp ffmpeg"
+        alert.addButton(withTitle: "Download")
+        alert.addButton(withTitle: "Cancel")
+
+        let input = PasteableTextField(frame: NSRect(x: 0, y: 0, width: 400, height: 24))
+        input.placeholderString = "https://..."
+        input.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        if let clip = clipboardURLString() { input.stringValue = clip }
+        alert.accessoryView = input
+        alert.window.initialFirstResponder = input
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let urlString = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !urlString.isEmpty else { return }
+        beginDownload(urlString: urlString)
+    }
+
+    private func clipboardURLString() -> String? {
+        guard let raw = NSPasteboard.general.string(forType: .string) else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") else { return nil }
+        return trimmed
+    }
+
+    private func beginDownload(urlString: String) {
+        downloadClipboardMenuItem.isEnabled = false
+        downloadURLMenuItem.isEnabled = false
+        downloadProgressMenuItem.isHidden = false
+        cancelDownloadMenuItem.isHidden = false
+        statusItem.button?.image = nil
+        statusItem.button?.title = "⬇︎"
+
+        audioDownloader.onProgress = { [weak self] progress in
+            guard let self else { return }
+            if let pct = progress {
+                let label = String(format: "%.0f%%", pct * 100)
+                self.downloadProgressMenuItem.title = "  ⬇︎  Downloading… \(label)"
+                self.statusItem.button?.title = "⬇︎ \(label)"
+            } else {
+                self.downloadProgressMenuItem.title = "  ⬇︎  Downloading…"
+                self.statusItem.button?.title = "⬇︎"
+            }
+        }
+
+        audioDownloader.startDownload(urlString: urlString) { [weak self] result in
+            self?.finishDownload(result: result)
+        }
+    }
+
+    @objc private func cancelDownload() {
+        audioDownloader.cancelDownload()
+        resetDownloadMenu()
+    }
+
+    private func finishDownload(result: DownloadResult) {
+        resetDownloadMenu()
+
+        switch result {
+        case .success(let url):
+            let alert = NSAlert()
+            alert.messageText = "Download Complete"
+            alert.informativeText = "Saved to:\n\(url.path)"
+            alert.addButton(withTitle: "Show in Finder")
+            alert.addButton(withTitle: "OK")
+            if alert.runModal() == .alertFirstButtonReturn {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            }
+
+        case .failure(let message):
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Download Failed"
+            alert.informativeText = message
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+
+        case .cancelled:
+            break
+        }
+    }
+
+    private func resetDownloadMenu() {
+        audioDownloader.onProgress = nil
+        downloadProgressMenuItem.isHidden = true
+        downloadProgressMenuItem.title = "  ⬇︎  Downloading…"
+        downloadURLMenuItem.isEnabled = true
+        cancelDownloadMenuItem.isHidden = true
+        updateDownloadMenuState()
+        if !AppState.shared.isRecording {
+            let image = NSImage(systemSymbolName: "wrench.and.screwdriver.fill", accessibilityDescription: "Switchboard")
+            image?.isTemplate = true
+            statusItem.button?.image = image
+            statusItem.button?.title = ""
+        }
+    }
+
     @objc private func showAbout() {
         let a = NSAlert()
-        a.messageText = "Switchboard v2.0.0"
-        a.informativeText = "⌥⇥ Windows-style Option-Tab | ⏺ System Audio Recorder\nBuilt with Swift."
+        a.messageText = "Switchboard v2.1.0"
+        a.informativeText = "⌥⇥  Windows-style Option-Tab switcher\n⏺  System audio recorder\n⬇︎  Audio URL downloader\n\nBuilt with Swift."
         a.addButton(withTitle: "OK"); a.runModal()
     }
 
     @objc private func quit() {
         if AppState.shared.isRecording { audioRecorder.stopRecording() }
+        if audioDownloader.isDownloading { audioDownloader.cancelDownload() }
         NSApp.terminate(nil)
+    }
+}
+
+// MARK: - Pasteable Text Field
+
+/// NSTextField subclass that correctly routes ⌘V/C/A/X/Z through the
+/// field editor when used inside an NSAlert accessory view.
+class PasteableTextField: NSTextField {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard event.type == .keyDown,
+              event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command else {
+            return super.performKeyEquivalent(with: event)
+        }
+        switch event.charactersIgnoringModifiers {
+        case "v": return NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: self)
+        case "c": return NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: self)
+        case "a": return NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: self)
+        case "x": return NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: self)
+        case "z": return NSApp.sendAction(Selector(("undo:")), to: nil, from: self)
+        default:  return super.performKeyEquivalent(with: event)
+        }
     }
 }
 

@@ -48,12 +48,28 @@ class ThumbnailCache {
 // MARK: - Settings
 class AltTabSettings {
     static let shared = AltTabSettings()
-    var excludedAppNames: Set<String> = [
+
+    private static let defaultExclusions: Set<String> = [
         "Stickies", "Window Server", "SystemUIServer",
         "ControlCenter", "Spotlight", "loginwindow",
         "Notification Centre", "NotificationCenter", "Notification Center",
         "Widgets", "WidgetBoard", "widgetsimulator",
     ]
+    private let key = "SwitchboardExcludedApps"
+
+    // didSet writes to UserDefaults so exclusions survive relaunch.
+    // Swift calls didSet for in-place Set mutations (insert/remove) too.
+    var excludedAppNames: Set<String> {
+        didSet { UserDefaults.standard.set(Array(excludedAppNames), forKey: key) }
+    }
+
+    private init() {
+        if let saved = UserDefaults.standard.array(forKey: key) as? [String] {
+            excludedAppNames = Set(saved)
+        } else {
+            excludedAppNames = Self.defaultExclusions
+        }
+    }
 }
 
 // MARK: - Permissions
@@ -84,6 +100,10 @@ class SwitchboardPermissions {
     static func ensureRequiredPermissions(onReady: @escaping () -> Void) {
         if hasAccessibility {
             onReady()
+            if !hasScreenRecording {
+                requestScreenRecordingForThumbnails()
+                DispatchQueue.main.async { showPermissionSetupAlert() }
+            }
             return
         }
 
@@ -94,10 +114,11 @@ class SwitchboardPermissions {
     }
 
     static func showSetupAlertIfNeeded() {
-        guard !hasAccessibility else { return }
-        requestMissingPermissions()
+        guard !hasAccessibility || !hasScreenRecording else { return }
+        if !hasAccessibility { requestMissingPermissions() }
+        if !hasScreenRecording { requestScreenRecordingForThumbnails() }
         showPermissionSetupAlert()
-        startPermissionPolling()
+        if !hasAccessibility { startPermissionPolling() }
     }
 
     static func showSwitcherBlockedAlertIfNeeded() {
@@ -122,16 +143,25 @@ class SwitchboardPermissions {
         let callbacks = onReadyCallbacks
         onReadyCallbacks.removeAll()
         callbacks.forEach { $0() }
+        if !hasScreenRecording {
+            requestScreenRecordingForThumbnails()
+        }
     }
 
     private static func showPermissionSetupAlert() {
-        guard !alertIsShowing, !hasAccessibility else { return }
+        let needsAccessibility = !hasAccessibility
+        let needsScreenRecording = !hasScreenRecording
+        guard !alertIsShowing, needsAccessibility || needsScreenRecording else { return }
         alertIsShowing = true
 
         let alert = NSAlert()
         alert.messageText = "Switchboard Needs Permissions"
-        alert.informativeText = permissionMessage()
-        if !hasAccessibility { alert.addButton(withTitle: "Open Accessibility") }
+        alert.informativeText = permissionMessage(
+            needsAccessibility: needsAccessibility,
+            needsScreenRecording: needsScreenRecording
+        )
+        if needsAccessibility { alert.addButton(withTitle: "Open Accessibility") }
+        if needsScreenRecording { alert.addButton(withTitle: "Open Screen Recording") }
         alert.addButton(withTitle: "Check Again")
         alert.addButton(withTitle: "Quit")
         NSApp.activate()
@@ -142,36 +172,54 @@ class SwitchboardPermissions {
 
         if hasAccessibility {
             finishPermissionSetup()
-        } else {
-            let delay: TimeInterval = openedSettings ? 8 : 0.75
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                showPermissionSetupAlert()
-            }
+        }
+
+        guard !hasAccessibility || !hasScreenRecording else { return }
+
+        let delay: TimeInterval = openedSettings ? 8 : 0.75
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            showPermissionSetupAlert()
         }
     }
 
     @discardableResult
     private static func handlePermissionAlertResponse(_ response: NSApplication.ModalResponse) -> Bool {
         var buttonIndex = 1
+        var openedSettings = false
         if !hasAccessibility {
             if response.rawValue == NSApplication.ModalResponse.alertFirstButtonReturn.rawValue + buttonIndex - 1 {
                 openPrivacyPane("Privacy_Accessibility")
-                return true
+                openedSettings = true
+            }
+            buttonIndex += 1
+        }
+        if !hasScreenRecording {
+            if response.rawValue == NSApplication.ModalResponse.alertFirstButtonReturn.rawValue + buttonIndex - 1 {
+                requestScreenRecordingForThumbnails()
+                openPrivacyPane("Privacy_ScreenCapture")
+                openedSettings = true
             }
             buttonIndex += 1
         }
         if response.rawValue == NSApplication.ModalResponse.alertFirstButtonReturn.rawValue + buttonIndex {
             NSApp.terminate(nil)
         }
-        return false
+        return openedSettings
     }
 
-    private static func permissionMessage() -> String {
-        return """
-        Option-Tab needs Accessibility to listen for the keyboard shortcut and switch windows.
-
-        Screen Recording is only needed for thumbnails. If it is not granted yet, Switchboard will still open with app icons and will request thumbnail permission when previews are captured.
-        """
+    private static func permissionMessage(needsAccessibility: Bool, needsScreenRecording: Bool) -> String {
+        var lines: [String] = []
+        if needsAccessibility {
+            lines.append("Option-Tab needs Accessibility to listen for the keyboard shortcut and switch windows.")
+        }
+        if needsScreenRecording {
+            lines.append("Screen Recording is needed for live window thumbnails and system audio capture.")
+        }
+        if needsAccessibility && needsScreenRecording {
+            lines.append("")
+            lines.append("Grant Accessibility first, then Screen Recording.")
+        }
+        return lines.joined(separator: "\n")
     }
 
     static func requestScreenRecordingForThumbnails() {
@@ -241,7 +289,12 @@ class AltTabManager: NSObject {
     private var eventTapSource: CFRunLoopSource?
     private var globalKeyMonitor: Any?
     private var hotKeyRef: EventHotKeyRef?
+    private var closeHotKeyRef: EventHotKeyRef?
     private var hotKeyHandler: EventHandlerRef?
+    private var permissionMonitorTimer: Timer?
+    private var isHandlingPermissionLoss = false
+    private var optimisticallyClosingWindowIDs = Set<CGWindowID>()
+    private var dismissSwitcherOnOptionRelease = false
 
     override init() {
         super.init()
@@ -255,15 +308,15 @@ class AltTabManager: NSObject {
 
     deinit {
         captureTask?.cancel(); refreshTask?.cancel()
-        if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: false) }
-        if let eventTapSource { CFRunLoopRemoveSource(CFRunLoopGetCurrent(), eventTapSource, .commonModes) }
-        if let globalKeyMonitor { NSEvent.removeMonitor(globalKeyMonitor) }
-        if let hotKeyRef { UnregisterEventHotKey(hotKeyRef) }
-        if let hotKeyHandler { RemoveEventHandler(hotKeyHandler) }
+        teardownHotkeyMonitoring(stopPermissionMonitor: true)
         NotificationCenter.default.removeObserver(self)
     }
 
     func registerHotkey() {
+        guard SwitchboardPermissions.hasAccessibility else {
+            startPermissionMonitor()
+            return
+        }
         guard eventTap == nil else { return }
         let mask = CGEventMask(
             (1 << CGEventType.keyDown.rawValue) |
@@ -283,17 +336,101 @@ class AltTabManager: NSObject {
             self?.handleGlobalNSEvent(event)
         }
         registerCarbonHotkey()
+        startPermissionMonitor()
         print("Switchboard: hotkey ready")
+    }
+
+    private func startPermissionMonitor() {
+        guard permissionMonitorTimer == nil else { return }
+        let timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            self?.syncPermissionState()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        permissionMonitorTimer = timer
+    }
+
+    private func syncPermissionState() {
+        if SwitchboardPermissions.hasAccessibility {
+            isHandlingPermissionLoss = false
+            if eventTap == nil {
+                registerHotkey()
+            }
+            return
+        }
+
+        handleAccessibilityRevoked()
+    }
+
+    private func handleAccessibilityRevoked() {
+        guard !isHandlingPermissionLoss else { return }
+        isHandlingPermissionLoss = true
+        hideAltTab()
+        optionKeyHeld = false
+        isProcessingHotkey = false
+        teardownHotkeyMonitoring(stopPermissionMonitor: false)
+        print("Switchboard: Accessibility permission revoked; released keyboard and mouse hooks")
+    }
+
+    private func teardownHotkeyMonitoring(stopPermissionMonitor: Bool) {
+        if let eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: false)
+            CFMachPortInvalidate(eventTap)
+        }
+        if let eventTapSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), eventTapSource, .commonModes)
+        }
+        if let globalKeyMonitor {
+            NSEvent.removeMonitor(globalKeyMonitor)
+        }
+        if let hotKeyRef {
+            UnregisterEventHotKey(hotKeyRef)
+        }
+        if let closeHotKeyRef {
+            UnregisterEventHotKey(closeHotKeyRef)
+        }
+        if let hotKeyHandler {
+            RemoveEventHandler(hotKeyHandler)
+        }
+        eventTap = nil
+        eventTapSource = nil
+        globalKeyMonitor = nil
+        hotKeyRef = nil
+        closeHotKeyRef = nil
+        hotKeyHandler = nil
+
+        if stopPermissionMonitor {
+            permissionMonitorTimer?.invalidate()
+            permissionMonitorTimer = nil
+        }
     }
 
     private func registerCarbonHotkey() {
         var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         InstallEventHandler(
             GetApplicationEventTarget(),
-            { _, _, userData in
+            { _, event, userData in
                 guard let userData else { return noErr }
                 let manager = Unmanaged<AltTabManager>.fromOpaque(userData).takeUnretainedValue()
-                manager.triggerOptionTab()
+                var hotKeyID = EventHotKeyID()
+                let status = GetEventParameter(
+                    event,
+                    EventParamName(kEventParamDirectObject),
+                    EventParamType(typeEventHotKeyID),
+                    nil,
+                    MemoryLayout<EventHotKeyID>.size,
+                    nil,
+                    &hotKeyID
+                )
+                guard status == noErr else { return status }
+
+                switch hotKeyID.id {
+                case 1:
+                    manager.triggerOptionTab()
+                case 2:
+                    manager.triggerOptionW()
+                default:
+                    break
+                }
                 return noErr
             },
             1,
@@ -304,6 +441,8 @@ class AltTabManager: NSObject {
 
         let hotKeyID = EventHotKeyID(signature: Self.fourCharCode("SWBD"), id: 1)
         RegisterEventHotKey(UInt32(kVK_Tab), UInt32(optionKey), hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
+        let closeHotKeyID = EventHotKeyID(signature: Self.fourCharCode("SWBD"), id: 2)
+        RegisterEventHotKey(UInt32(kVK_ANSI_W), UInt32(optionKey), closeHotKeyID, GetApplicationEventTarget(), 0, &closeHotKeyRef)
     }
 
     private static func fourCharCode(_ value: String) -> OSType {
@@ -317,7 +456,11 @@ class AltTabManager: NSObject {
             callback: { proxy, type, event, ctx in
                 let manager = Unmanaged<AltTabManager>.fromOpaque(ctx!).takeUnretainedValue()
                 if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                    if let tap = manager.eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
+                    if SwitchboardPermissions.hasAccessibility {
+                        if let tap = manager.eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
+                    } else {
+                        DispatchQueue.main.async { manager.handleAccessibilityRevoked() }
+                    }
                     return Unmanaged.passRetained(event)
                 }
                 return manager.handleCGEvent(type: type, event: event)
@@ -328,7 +471,14 @@ class AltTabManager: NSObject {
 
     private func handleGlobalNSEvent(_ event: NSEvent) {
         if event.type == .flagsChanged {
-            optionKeyHeld = event.modifierFlags.contains(.option)
+            handleModifierFlagsChanged(optionDown: event.modifierFlags.contains(.option))
+            return
+        }
+        if event.type == .keyDown,
+           event.keyCode == 13,
+           event.modifierFlags.contains(.option),
+           isShowing {
+            DispatchQueue.main.async { [weak self] in self?.closeSelectedWindow() }
             return
         }
         guard event.type == .keyDown,
@@ -357,7 +507,19 @@ class AltTabManager: NSObject {
         }
     }
 
+    private func triggerOptionW() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isShowing else { return }
+            self.closeSelectedWindow()
+        }
+    }
+
     private func handleCGEvent(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        guard SwitchboardPermissions.hasAccessibility else {
+            DispatchQueue.main.async { [weak self] in self?.handleAccessibilityRevoked() }
+            return Unmanaged.passRetained(event)
+        }
+
         if type == .mouseMoved, isShowing {
             handleSwitcherMouseMoved(at: event.location)
             return Unmanaged.passRetained(event)
@@ -369,18 +531,20 @@ class AltTabManager: NSObject {
         }
         if type == .flagsChanged {
             let optionNow = event.flags.contains(.maskAlternate)
-            if !optionNow && optionKeyHeld && isShowing {
-                optionKeyHeld = false
-                DispatchQueue.main.async { [weak self] in self?.activateSelectedAndHide() }
+            if handleModifierFlagsChanged(optionDown: optionNow) {
                 return nil
             }
-            optionKeyHeld = optionNow
             return Unmanaged.passRetained(event)
         }
         if type == .keyDown {
             let kc = event.getIntegerValueField(.keyboardEventKeycode)
-            if event.flags.contains(.maskAlternate) && kc == 48 {
+            let optionDown = event.flags.contains(.maskAlternate) || optionKeyHeld
+            if optionDown && kc == 48 {
                 triggerOptionTab()
+                return nil
+            }
+            if optionDown && kc == 13, isShowing {
+                DispatchQueue.main.async { [weak self] in self?.closeSelectedWindow() }
                 return nil
             }
             if kc == 53, isShowing { DispatchQueue.main.async { [weak self] in self?.hideAltTab() }; return nil }
@@ -402,11 +566,24 @@ class AltTabManager: NSObject {
         guard !windows.isEmpty else { return }
         initialMouseLocation = NSEvent.mouseLocation
         mouseSelectionEnabled = false
+        dismissSwitcherOnOptionRelease = false
         selectedIndex = 0; isShowing = true
         renderPanel(restartCapture: true)
     }
 
-    private func renderPanel(restartCapture: Bool) {
+    @discardableResult
+    private func handleModifierFlagsChanged(optionDown: Bool) -> Bool {
+        if isShowing && !optionDown && (dismissSwitcherOnOptionRelease || optionKeyHeld) {
+            dismissSwitcherOnOptionRelease = false
+            optionKeyHeld = false
+            DispatchQueue.main.async { [weak self] in self?.activateSelectedAndHide() }
+            return true
+        }
+        optionKeyHeld = optionDown
+        return false
+    }
+
+    private func renderPanel(restartCapture: Bool, animated: Bool = false) {
         guard isShowing, !windows.isEmpty else { return }
 
         let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
@@ -426,15 +603,26 @@ class AltTabManager: NSObject {
             panel.isMovableByWindowBackground = false; panel.hidesOnDeactivate = false
             panel.ignoresMouseEvents = false
             panel.acceptsMouseMovedEvents = true
+        } else if animated {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.16
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                panel.animator().setFrame(frame, display: true)
+            }
         } else {
-            panel.setFrame(frame, display: false)
+            panel.setFrame(frame, display: true)
         }
-        panel.backgroundColor = isDark ? NSColor(white: 0.12, alpha: 0.96) : NSColor(white: 0.95, alpha: 0.96)
+        panel.isOpaque = false
+        panel.hasShadow = false
+        panel.backgroundColor = .clear
 
         let gridView = NSView(frame: NSRect(origin: .zero, size: layout.contentSize))
-        gridView.wantsLayer = true; gridView.layer?.cornerRadius = 16; gridView.layer?.masksToBounds = true
+        gridView.wantsLayer = true
+        gridView.layer?.cornerRadius = 18
+        gridView.layer?.masksToBounds = false
         buildGrid(in: gridView, layout: layout, isDark: isDark)
 
+        let backdrop = makePanelBackdrop(size: layout.panelSize, isDark: isDark)
         if layout.needsScroll {
             let scroll = NSScrollView(frame: NSRect(origin: .zero, size: layout.panelSize))
             scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = false
@@ -442,20 +630,94 @@ class AltTabManager: NSObject {
             scroll.borderType = .noBorder
             scroll.drawsBackground = false
             scroll.documentView = gridView
-            panel.contentView = scroll
+            backdrop.addSubview(scroll)
             let topOrigin = max(0, layout.contentSize.height - layout.panelSize.height)
             scroll.contentView.scroll(to: NSPoint(x: 0, y: topOrigin))
             scroll.reflectScrolledClipView(scroll.contentView)
         } else {
-            panel.contentView = gridView
+            backdrop.addSubview(gridView)
         }
+        panel.contentView = backdrop
 
         panel.orderFrontRegardless(); panel.makeKey(); altTabPanel = panel
 
-        if restartCapture {
+        if restartCapture && SwitchboardPermissions.hasScreenRecording {
             captureThumbnails(thumbW: layout.thumbnailSize.width, thumbH: layout.thumbnailSize.height)
             startBackgroundRefresh(thumbW: layout.thumbnailSize.width, thumbH: layout.thumbnailSize.height)
         }
+    }
+
+    private func makePanelBackdrop(size: CGSize, isDark: Bool) -> NSView {
+        let shell = NSView(frame: NSRect(origin: .zero, size: size))
+        shell.wantsLayer = true
+        shell.layer?.cornerRadius = 22
+        shell.layer?.masksToBounds = false
+        shell.layer?.shadowColor = NSColor.black.cgColor
+        shell.layer?.shadowOpacity = isDark ? 0.34 : 0.18
+        shell.layer?.shadowRadius = 28
+        shell.layer?.shadowOffset = CGSize(width: 0, height: -10)
+
+        let backdrop = NSVisualEffectView(frame: shell.bounds)
+        backdrop.autoresizingMask = [.width, .height]
+        backdrop.blendingMode = .behindWindow
+        backdrop.material = .popover
+        backdrop.state = .active
+        backdrop.wantsLayer = true
+        backdrop.layer?.cornerRadius = 22
+        backdrop.layer?.masksToBounds = true
+        backdrop.layer?.borderWidth = 0.5
+        backdrop.layer?.borderColor = NSColor.white.withAlphaComponent(isDark ? 0.10 : 0.20).cgColor
+        shell.addSubview(backdrop)
+
+        let wash = NSView(frame: backdrop.bounds)
+        wash.autoresizingMask = [.width, .height]
+        wash.wantsLayer = true
+        wash.layer?.backgroundColor = panelWashColor(isDark: isDark).cgColor
+        backdrop.addSubview(wash)
+
+        let sheen = NSView(frame: backdrop.bounds)
+        sheen.autoresizingMask = [.width, .height]
+        sheen.wantsLayer = true
+        let gradient = CAGradientLayer()
+        gradient.frame = sheen.bounds
+        gradient.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        gradient.startPoint = CGPoint(x: 0.5, y: 1)
+        gradient.endPoint = CGPoint(x: 0.5, y: 0)
+        gradient.colors = [
+            NSColor.clear.cgColor,
+            NSColor.white.withAlphaComponent(isDark ? 0.04 : 0.08).cgColor,
+            NSColor.white.withAlphaComponent(isDark ? 0.08 : 0.13).cgColor,
+        ]
+        gradient.locations = [0, 0.55, 1]
+        sheen.layer?.addSublayer(gradient)
+        backdrop.addSubview(sheen)
+
+        return shell
+    }
+
+    private func panelWashColor(isDark: Bool) -> NSColor {
+        if isDark {
+            return NSColor(white: 0.06, alpha: 0.18)
+        }
+        return NSColor.white.withAlphaComponent(0.12)
+    }
+
+    private func labelTextColor(selected: Bool, isDark: Bool) -> NSColor {
+        if isDark {
+            return selected
+                ? NSColor.white.withAlphaComponent(0.92)
+                : NSColor.white.withAlphaComponent(0.48)
+        }
+        return selected
+            ? NSColor.black.withAlphaComponent(0.88)
+            : NSColor.black.withAlphaComponent(0.42)
+    }
+
+    private func applySelectionStyle(to thumbnailContainer: NSView?, selected: Bool) {
+        thumbnailContainer?.layer?.shadowColor = NSColor.black.cgColor
+        thumbnailContainer?.layer?.shadowOpacity = selected ? 0.42 : 0
+        thumbnailContainer?.layer?.shadowRadius = selected ? 10 : 0
+        thumbnailContainer?.layer?.shadowOffset = CGSize(width: 0, height: -2)
     }
 
     private func computeLayout(for windows: [WindowInfo], in screen: CGRect) -> AltTabLayout {
@@ -485,7 +747,8 @@ class AltTabManager: NSObject {
             let hByRows = (availableH - gap * CGFloat(rows - 1) - rowChrome) / CGFloat(rows)
             let thumbW = min(maxThumbW, wByCols, hByRows * aspect)
             guard thumbW >= minThumbW else { continue }
-            let score = thumbW * (thumbW / aspect)
+            let emptySlots = cols * rows - count
+            let score = thumbW * (thumbW / aspect) - CGFloat(emptySlots) * thumbW * 0.22
             if score > bestScore {
                 bestScore = score; bestThumbW = thumbW; bestCols = cols; bestRows = rows
             }
@@ -500,7 +763,13 @@ class AltTabManager: NSObject {
 
         let thumbH = bestThumbW / aspect
         let cellH = thumbH + labelGap + labelHeight
-        let contentW = CGFloat(bestCols) * bestThumbW + CGFloat(bestCols - 1) * gap + padding * 2
+        var maxRowW: CGFloat = 0
+        for row in 0..<bestRows {
+            let itemsInRow = min(bestCols, count - row * bestCols)
+            let rowW = CGFloat(itemsInRow) * bestThumbW + CGFloat(max(0, itemsInRow - 1)) * gap
+            maxRowW = max(maxRowW, rowW)
+        }
+        let contentW = maxRowW + padding * 2
         let contentH = CGFloat(bestRows) * cellH + CGFloat(bestRows - 1) * gap + padding * 2
         let panelW = min(contentW, maxPanelW)
         let panelH = min(contentH, maxPanelH)
@@ -539,17 +808,16 @@ class AltTabManager: NSObject {
 
         let thumbW = layout.thumbnailSize.width
         let thumbH = layout.thumbnailSize.height
-        let cellW = thumbW + layout.gap; let cellH = thumbH + layout.labelGap + layout.labelHeight
-        let totalGridW = CGFloat(layout.columns) * cellW - layout.gap
-        let startX = layout.padding + (cv.bounds.width - layout.padding * 2 - totalGridW) / 2
-
-        let bg = isDark ? NSColor.black.withAlphaComponent(0.3).cgColor : NSColor.white.withAlphaComponent(0.4).cgColor
-        let border = isDark ? NSColor.white.withAlphaComponent(0.15).cgColor : NSColor.black.withAlphaComponent(0.12).cgColor
-        let textColor = isDark ? NSColor.white : NSColor.black
+        let cellW = thumbW + layout.gap
+        let cellH = thumbH + layout.labelGap + layout.labelHeight
 
         for (i, win) in windows.enumerated() {
-            let col = i % layout.columns; let row = i / layout.columns
-            let slotX = startX + CGFloat(col) * cellW
+            let col = i % layout.columns
+            let row = i / layout.columns
+            let itemsInRow = min(layout.columns, windows.count - row * layout.columns)
+            let rowWidth = CGFloat(itemsInRow) * thumbW + CGFloat(max(0, itemsInRow - 1)) * layout.gap
+            let rowStartX = layout.padding + (cv.bounds.width - layout.padding * 2 - rowWidth) / 2
+            let slotX = rowStartX + CGFloat(col) * cellW
             let baseY = cv.bounds.height - layout.padding - CGFloat(row + 1) * cellH - CGFloat(row) * layout.gap
             let windowAspect = max(0.65, min(2.2, win.bounds.width / max(win.bounds.height, 1)))
             let cardAspect = thumbW / max(thumbH, 1)
@@ -572,15 +840,17 @@ class AltTabManager: NSObject {
 
             let container = NSView(frame: NSRect(x: 0, y: layout.labelHeight + layout.labelGap, width: tileThumbW, height: thumbH))
             container.wantsLayer = true
-            container.layer?.cornerRadius = 8; container.layer?.masksToBounds = true
-            container.layer?.borderWidth = i == selectedIndex ? 3 : 1
-            container.layer?.borderColor = i == selectedIndex ? NSColor.systemBlue.cgColor : border
-            container.layer?.backgroundColor = bg
+            container.layer?.cornerRadius = 10
+            container.layer?.masksToBounds = false
+            container.layer?.backgroundColor = NSColor.clear.cgColor
+            applySelectionStyle(to: container, selected: i == selectedIndex)
 
             let iv = ThumbnailImageView(frame: container.bounds)
             iv.imageScaling = .scaleProportionallyUpOrDown
             iv.imageAlignment = .alignCenter
-            iv.wantsLayer = true; iv.layer?.masksToBounds = true
+            iv.wantsLayer = true
+            iv.layer?.cornerRadius = 10
+            iv.layer?.masksToBounds = true
 
             // Cache first, then app icon until ScreenCaptureKit provides the preview.
             if let cached = ThumbnailCache.shared.get(win.windowID) {
@@ -609,7 +879,7 @@ class AltTabManager: NSObject {
             lbl.frame = NSRect(x: labelX, y: baseY, width: max(20, tileThumbW - iconSize - 6), height: layout.labelHeight)
             lbl.frame.origin.y = 0
             lbl.alignment = .left; lbl.font = .systemFont(ofSize: max(11, min(13, layout.labelHeight - 6)))
-            lbl.textColor = i == selectedIndex ? textColor : textColor.withAlphaComponent(0.55)
+            lbl.textColor = labelTextColor(selected: i == selectedIndex, isDark: isDark)
             lbl.lineBreakMode = .byTruncatingTail
             cell.addSubview(lbl); labelViews.append(lbl)
         }
@@ -687,13 +957,12 @@ class AltTabManager: NSObject {
 
     private func updateSelection() {
         let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        let text = isDark ? NSColor.white : NSColor.black
-        let bd = isDark ? NSColor.white.withAlphaComponent(0.15).cgColor : NSColor.black.withAlphaComponent(0.12).cgColor
         for (i, v) in thumbnailViews.enumerated() {
-            v.superview?.layer?.borderWidth = i == selectedIndex ? 3 : 1
-            v.superview?.layer?.borderColor = i == selectedIndex ? NSColor.systemBlue.cgColor : bd
+            applySelectionStyle(to: v.superview, selected: i == selectedIndex)
         }
-        for (i, l) in labelViews.enumerated() { l.textColor = i == selectedIndex ? text : text.withAlphaComponent(0.55) }
+        for (i, l) in labelViews.enumerated() {
+            l.textColor = labelTextColor(selected: i == selectedIndex, isDark: isDark)
+        }
         scrollSelectedTileIntoView()
     }
 
@@ -707,6 +976,109 @@ class AltTabManager: NSObject {
         if selectedIndex < windows.count { activateWindow(windows[selectedIndex]) }
         if keepOptionReleaseFromReactivating { optionKeyHeld = false }
         hideAltTab()
+    }
+
+    private func closeSelectedWindow() {
+        guard selectedIndex < windows.count else { return }
+        let window = windows[selectedIndex]
+        let closedIndex = selectedIndex
+
+        if optimisticallyClosingWindowIDs.contains(window.windowID) { return }
+
+        guard requestWindowClose(window) else {
+            NSSound.beep()
+            return
+        }
+
+        optimisticallyClosingWindowIDs.insert(window.windowID)
+        optimisticallyRemoveWindow(at: closedIndex, windowID: window.windowID)
+        if isShowing {
+            dismissSwitcherOnOptionRelease = true
+            optionKeyHeld = CGEventSource.flagsState(.hidSystemState).contains(.maskAlternate)
+        }
+        confirmWindowClosed(window, closedAtIndex: closedIndex)
+    }
+
+    private func optimisticallyRemoveWindow(at index: Int, windowID: CGWindowID) {
+        guard index < windows.count, windows[index].windowID == windowID else { return }
+        windows.remove(at: index)
+
+        guard !windows.isEmpty else {
+            hideAltTab(keepPendingCloseTracking: true)
+            return
+        }
+
+        selectedIndex = min(index, windows.count - 1)
+        renderPanel(restartCapture: false, animated: true)
+    }
+
+    private func confirmWindowClosed(_ window: WindowInfo, closedAtIndex: Int, attemptsRemaining: Int = 40) {
+        guard optimisticallyClosingWindowIDs.contains(window.windowID) else { return }
+
+        if !isWindowStillVisible(window.windowID) {
+            optimisticallyClosingWindowIDs.remove(window.windowID)
+            if isShowing {
+                reconcileWindowsAfterConfirmedClose()
+            }
+            return
+        }
+
+        guard attemptsRemaining > 0 else {
+            optimisticallyClosingWindowIDs.remove(window.windowID)
+            rollbackFailedClose(window: window, closedAtIndex: closedAtIndex)
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.confirmWindowClosed(window, closedAtIndex: closedAtIndex, attemptsRemaining: attemptsRemaining - 1)
+        }
+    }
+
+    private func reconcileWindowsAfterConfirmedClose() {
+        let fresh = getWindows()
+        guard !fresh.isEmpty else {
+            hideAltTab()
+            return
+        }
+
+        let preferredID = selectedIndex < windows.count ? windows[selectedIndex].windowID : nil
+        let freshIDs = Set(fresh.map(\.windowID))
+        let localIDs = Set(windows.map(\.windowID))
+
+        guard freshIDs != localIDs else { return }
+
+        windows = fresh
+        if let preferredID, let idx = windows.firstIndex(where: { $0.windowID == preferredID }) {
+            selectedIndex = idx
+        } else {
+            selectedIndex = min(selectedIndex, windows.count - 1)
+        }
+        renderPanel(restartCapture: false, animated: false)
+    }
+
+    private func rollbackFailedClose(window: WindowInfo, closedAtIndex: Int) {
+        guard isWindowStillVisible(window.windowID) else { return }
+
+        let wasHidden = !isShowing
+        windows = getWindows()
+
+        guard !windows.isEmpty else {
+            hideAltTab()
+            return
+        }
+
+        guard let restoredIndex = windows.firstIndex(where: { $0.windowID == window.windowID }) else {
+            NSSound.beep()
+            return
+        }
+
+        selectedIndex = restoredIndex
+        if wasHidden {
+            isShowing = true
+        }
+        NSSound.beep()
+        renderPanel(restartCapture: true, animated: true)
+        altTabPanel?.orderFrontRegardless()
     }
 
     private func handleSwitcherMouseDown(at screenPoint: CGPoint) -> Bool {
@@ -776,9 +1148,13 @@ class AltTabManager: NSObject {
         return true
     }
 
-    func hideAltTab() {
+    func hideAltTab(keepPendingCloseTracking: Bool = false) {
         isShowing = false; captureTask?.cancel(); captureTask = nil
         refreshTask?.cancel(); refreshTask = nil
+        dismissSwitcherOnOptionRelease = false
+        if !keepPendingCloseTracking {
+            optimisticallyClosingWindowIDs.removeAll()
+        }
         altTabPanel?.orderOut(nil); altTabPanel = nil
         thumbnailViews.removeAll(); thumbnailViewsByWindowID.removeAll(); labelViews.removeAll(); iconViews.removeAll(); tileViews.removeAll()
     }
@@ -790,6 +1166,24 @@ class AltTabManager: NSObject {
         AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString)
         let axApp = AXUIElementCreateApplication(window.pid)
         AXUIElementSetAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, axWindow)
+    }
+
+    private func requestWindowClose(_ window: WindowInfo) -> Bool {
+        guard let axWindow = axWindow(for: window) else { return false }
+        var closeButtonValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axWindow, kAXCloseButtonAttribute as CFString, &closeButtonValue) == .success,
+              let closeButtonValue else { return false }
+        let closeButton = closeButtonValue as! AXUIElement
+        return AXUIElementPerformAction(closeButton, kAXPressAction as CFString) == .success
+    }
+
+    private func isWindowStillVisible(_ windowID: CGWindowID) -> Bool {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+            return false
+        }
+        return list.contains { info in
+            (info[kCGWindowNumber as String] as? CGWindowID) == windowID
+        }
     }
 
     private func axWindow(for window: WindowInfo) -> AXUIElement? {
@@ -807,6 +1201,13 @@ class AltTabManager: NSObject {
             }
         }
 
+        if let frameMatch = axWindows.first(where: { axWindow in
+            guard let frame = axFrame(for: axWindow) else { return false }
+            return framesLikelyMatch(frame, window.bounds)
+        }) {
+            return frameMatch
+        }
+
         return axWindows.first { axWindow in
             var titleValue: CFTypeRef?
             guard !window.title.isEmpty,
@@ -814,6 +1215,31 @@ class AltTabManager: NSObject {
                   let title = titleValue as? String else { return false }
             return title == window.title
         }
+    }
+
+    private func axFrame(for axWindow: AXUIElement) -> CGRect? {
+        var positionValue: CFTypeRef?
+        var sizeValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axWindow, kAXPositionAttribute as CFString, &positionValue) == .success,
+              AXUIElementCopyAttributeValue(axWindow, kAXSizeAttribute as CFString, &sizeValue) == .success,
+              let positionValue,
+              let sizeValue else { return nil }
+
+        let positionAXValue = positionValue as! AXValue
+        let sizeAXValue = sizeValue as! AXValue
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(positionAXValue, .cgPoint, &position),
+              AXValueGetValue(sizeAXValue, .cgSize, &size) else { return nil }
+
+        return CGRect(origin: position, size: size)
+    }
+
+    private func framesLikelyMatch(_ axFrame: CGRect, _ cgFrame: CGRect) -> Bool {
+        let tolerance: CGFloat = 36
+        let originMatches = abs(axFrame.minX - cgFrame.minX) <= tolerance && abs(axFrame.minY - cgFrame.minY) <= tolerance
+        let sizeMatches = abs(axFrame.width - cgFrame.width) <= tolerance && abs(axFrame.height - cgFrame.height) <= tolerance
+        return originMatches && sizeMatches
     }
 
     @objc private func screenParametersChanged() {
@@ -839,7 +1265,10 @@ class AltTabManager: NSObject {
             // NO dedup — show ALL windows, even same app
             result.append(WindowInfo(windowID: wid, title: d[kCGWindowName as String] as? String ?? "", appName: own, bounds: b, pid: pid, alpha: al, windowLayer: ly))
         }
-        return result.sorted { ($0.appName, $0.title) < ($1.appName, $1.title) }
+        // CGWindowList already returns windows in Z-order (frontmost first).
+        // Preserving that order makes the switcher's index 0 = current window,
+        // index 1 = most recently used — the standard Alt-Tab behaviour.
+        return result
     }
 }
 
