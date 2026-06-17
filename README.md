@@ -15,7 +15,7 @@ Switchboard is a lightweight macOS menu bar utility for power-user workflows.
 
 ### Audio
 
-- System audio recorder — saves recordings to `~/Downloads/Switchboard Recordings`
+- System audio recorder — saves recordings to `~/Downloads/Switchboard`
 - **Audio URL downloader** — download audio straight from a URL into the same recordings folder
   - **YouTube, Vimeo, SoundCloud, Bandcamp**, and many other media pages via [yt-dlp](https://github.com/yt-dlp/yt-dlp) + ffmpeg
   - Direct audio file links (`.mp3`, `.m4a`, `.wav`, etc.) via built-in download — no extra tools required
@@ -28,7 +28,7 @@ Switchboard is a lightweight macOS menu bar utility for power-user workflows.
 
 - Organized **WINDOW SWITCHER** and **AUDIO** sections
 - Status bar shows recording duration (`⏺ 00:42`) or download progress (`⬇︎ 73%`) while active
-- **Open Recordings Folder** shortcut to jump to `~/Downloads/Switchboard Recordings`
+- **Open Switchboard Folder** shortcut to jump to `~/Downloads/Switchboard`
 
 ## Requirements
 

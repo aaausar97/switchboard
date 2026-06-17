@@ -11,7 +11,7 @@ enum DownloadResult {
 
 // MARK: - Audio Downloader
 
-/// Downloads audio from a URL to ~/Downloads/Switchboard Recordings.
+/// Downloads audio from a URL to ~/Downloads/Switchboard.
 /// Supports direct audio file URLs via URLSession and media page URLs
 /// (YouTube, Vimeo, SoundCloud, etc.) via yt-dlp + ffmpeg if installed.
 class AudioDownloader: NSObject {
@@ -87,7 +87,7 @@ class AudioDownloader: NSObject {
 
     private func recordingsDirectory() -> URL {
         let dir = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Switchboard Recordings")
+            .appendingPathComponent("Switchboard")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }

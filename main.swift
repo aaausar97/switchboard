@@ -76,7 +76,7 @@ class MenuBarController: NSObject, NSMenuDelegate {
         cancelDownloadMenuItem.isHidden = true
         menu.addItem(cancelDownloadMenuItem)
 
-        let openFolder = NSMenuItem(title: "  📁 Open Recordings Folder", action: #selector(openRecordings), keyEquivalent: "")
+        let openFolder = NSMenuItem(title: "  📁 Open Switchboard Folder", action: #selector(openRecordings), keyEquivalent: "")
         openFolder.target = self; menu.addItem(openFolder)
 
         menu.addItem(.separator())
@@ -189,7 +189,7 @@ class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func openRecordings() {
         let dir = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Switchboard Recordings")
+            .appendingPathComponent("Switchboard")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         NSWorkspace.shared.open(dir)
     }

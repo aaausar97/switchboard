@@ -4,7 +4,7 @@ import Foundation
 import ScreenCaptureKit
 
 /// Records system audio via ScreenCaptureKit's SCStream.
-/// Saves to ~/Downloads/Switchboard Recordings/ as .m4a files.
+/// Saves to ~/Downloads/Switchboard/ as .m4a files.
 class SystemAudioRecorder: NSObject {
     private var stream: SCStream?
     private var audioWriter: AVAssetWriter?
@@ -22,7 +22,7 @@ class SystemAudioRecorder: NSObject {
         guard !isRecording else { return }
 
         let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
-        let dir = downloads.appendingPathComponent("Switchboard Recordings")
+        let dir = downloads.appendingPathComponent("Switchboard")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
         let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd_HH-mm-ss"

@@ -37,11 +37,31 @@ private struct AltTabLayout {
 class ThumbnailCache {
     static let shared = ThumbnailCache()
     private var cache: [CGWindowID: NSImage] = [:]
+    private var capturedAt: [CGWindowID: Date] = [:]
     private let maxEntries = 128
+    private let defaultMaxAge: TimeInterval = 1.25
+
     func get(_ id: CGWindowID) -> NSImage? { cache[id] }
+
+    func isFresh(_ id: CGWindowID, maxAge: TimeInterval? = nil) -> Bool {
+        guard let capturedAt = capturedAt[id] else { return false }
+        return Date().timeIntervalSince(capturedAt) < (maxAge ?? defaultMaxAge)
+    }
+
     func set(_ id: CGWindowID, image: NSImage) {
-        if cache.count >= maxEntries { cache.keys.prefix(maxEntries/2).forEach { cache.removeValue(forKey: $0) } }
+        if cache.count >= maxEntries {
+            cache.keys.prefix(maxEntries / 2).forEach {
+                cache.removeValue(forKey: $0)
+                capturedAt.removeValue(forKey: $0)
+            }
+        }
         cache[id] = image
+        capturedAt[id] = Date()
+    }
+
+    func remove(_ id: CGWindowID) {
+        cache.removeValue(forKey: id)
+        capturedAt.removeValue(forKey: id)
     }
 }
 
@@ -272,10 +292,9 @@ class AltTabManager: NSObject {
     private var altTabPanel: NSPanel?
     private var selectedIndex = 0
     private var windows: [WindowInfo] = []
-    private var thumbnailViews: [ThumbnailImageView] = []
-    private var thumbnailViewsByWindowID: [CGWindowID: ThumbnailImageView] = [:]
+    private var thumbnailViews: [NSImageView] = []
+    private var thumbnailViewsByWindowID: [CGWindowID: NSImageView] = [:]
     private var labelViews: [NSTextField] = []
-    private var iconViews: [NSImageView] = []
     private var tileViews: [ThumbnailTileView] = []
     private var isShowing = false
     private var isProcessingHotkey = false
@@ -662,11 +681,12 @@ class AltTabManager: NSObject {
         backdrop.blendingMode = .behindWindow
         backdrop.material = .popover
         backdrop.state = .active
+        backdrop.alphaValue = isDark ? 0.94 : 0.96
         backdrop.wantsLayer = true
         backdrop.layer?.cornerRadius = 22
         backdrop.layer?.masksToBounds = true
         backdrop.layer?.borderWidth = 0.5
-        backdrop.layer?.borderColor = NSColor.white.withAlphaComponent(isDark ? 0.10 : 0.20).cgColor
+        backdrop.layer?.borderColor = NSColor.white.withAlphaComponent(isDark ? 0.14 : 0.22).cgColor
         shell.addSubview(backdrop)
 
         let wash = NSView(frame: backdrop.bounds)
@@ -685,8 +705,8 @@ class AltTabManager: NSObject {
         gradient.endPoint = CGPoint(x: 0.5, y: 0)
         gradient.colors = [
             NSColor.clear.cgColor,
-            NSColor.white.withAlphaComponent(isDark ? 0.04 : 0.08).cgColor,
-            NSColor.white.withAlphaComponent(isDark ? 0.08 : 0.13).cgColor,
+            NSColor.white.withAlphaComponent(isDark ? 0.03 : 0.06).cgColor,
+            NSColor.white.withAlphaComponent(isDark ? 0.06 : 0.10).cgColor,
         ]
         gradient.locations = [0, 0.55, 1]
         sheen.layer?.addSublayer(gradient)
@@ -697,20 +717,77 @@ class AltTabManager: NSObject {
 
     private func panelWashColor(isDark: Bool) -> NSColor {
         if isDark {
-            return NSColor(white: 0.06, alpha: 0.18)
+            return NSColor(white: 0.07, alpha: 0.09)
         }
-        return NSColor.white.withAlphaComponent(0.12)
+        return NSColor.white.withAlphaComponent(0.07)
     }
 
     private func labelTextColor(selected: Bool, isDark: Bool) -> NSColor {
         if isDark {
             return selected
-                ? NSColor.white.withAlphaComponent(0.92)
-                : NSColor.white.withAlphaComponent(0.48)
+                ? NSColor.white.withAlphaComponent(0.94)
+                : NSColor.white.withAlphaComponent(0.52)
         }
         return selected
-            ? NSColor.black.withAlphaComponent(0.88)
-            : NSColor.black.withAlphaComponent(0.42)
+            ? NSColor.black.withAlphaComponent(0.90)
+            : NSColor.black.withAlphaComponent(0.46)
+    }
+
+    private func labelParagraphStyle() -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
+        style.lineBreakMode = .byTruncatingTail
+        return style
+    }
+
+    private func labelAttributes(
+        font: NSFont,
+        color: NSColor,
+        kern: CGFloat = -0.15
+    ) -> [NSAttributedString.Key: Any] {
+        [
+            .font: font,
+            .foregroundColor: color,
+            .kern: kern,
+            .paragraphStyle: labelParagraphStyle(),
+        ]
+    }
+
+    private func styledWindowLabel(_ title: String, selected: Bool, isDark: Bool) -> NSAttributedString {
+        let fontSize: CGFloat = 11.5
+        let primary = labelTextColor(selected: selected, isDark: isDark)
+        let separator = " — "
+
+        if let sepRange = title.range(of: separator) {
+            let appName = String(title[..<sepRange.lowerBound])
+            let windowTitle = String(title[sepRange.upperBound...])
+            let result = NSMutableAttributedString()
+            result.append(NSAttributedString(string: appName, attributes: labelAttributes(
+                font: .systemFont(ofSize: fontSize, weight: selected ? .semibold : .medium),
+                color: primary
+            )))
+            result.append(NSAttributedString(string: separator, attributes: labelAttributes(
+                font: .systemFont(ofSize: fontSize, weight: .regular),
+                color: primary.withAlphaComponent(0.32)
+            )))
+            result.append(NSAttributedString(string: windowTitle, attributes: labelAttributes(
+                font: .systemFont(ofSize: fontSize, weight: .regular),
+                color: primary.withAlphaComponent(selected ? 0.86 : 0.62)
+            )))
+            return result
+        }
+
+        return NSAttributedString(string: title, attributes: labelAttributes(
+            font: .systemFont(ofSize: fontSize, weight: selected ? .semibold : .regular),
+            color: primary
+        ))
+    }
+
+    private func applyLabelStyle(_ label: NSTextField, title: String, selected: Bool, isDark: Bool) {
+        label.alignment = .center
+        label.lineBreakMode = .byTruncatingTail
+        label.maximumNumberOfLines = 1
+        label.attributedStringValue = styledWindowLabel(title, selected: selected, isDark: isDark)
     }
 
     private func applySelectionStyle(to thumbnailContainer: NSView?, selected: Bool) {
@@ -803,8 +880,8 @@ class AltTabManager: NSObject {
     }
 
     private func buildGrid(in cv: NSView, layout: AltTabLayout, isDark: Bool) {
-        thumbnailViews.forEach { $0.removeFromSuperview() }; labelViews.forEach { $0.removeFromSuperview() }; iconViews.forEach { $0.removeFromSuperview() }
-        thumbnailViews.removeAll(); thumbnailViewsByWindowID.removeAll(); labelViews.removeAll(); iconViews.removeAll(); tileViews.removeAll()
+        thumbnailViews.forEach { $0.removeFromSuperview() }; labelViews.forEach { $0.removeFromSuperview() }
+        thumbnailViews.removeAll(); thumbnailViewsByWindowID.removeAll(); labelViews.removeAll(); tileViews.removeAll()
 
         let thumbW = layout.thumbnailSize.width
         let thumbH = layout.thumbnailSize.height
@@ -819,16 +896,8 @@ class AltTabManager: NSObject {
             let rowStartX = layout.padding + (cv.bounds.width - layout.padding * 2 - rowWidth) / 2
             let slotX = rowStartX + CGFloat(col) * cellW
             let baseY = cv.bounds.height - layout.padding - CGFloat(row + 1) * cellH - CGFloat(row) * layout.gap
-            let windowAspect = max(0.65, min(2.2, win.bounds.width / max(win.bounds.height, 1)))
-            let cardAspect = thumbW / max(thumbH, 1)
-            let minTileW = min(thumbW, max(170, thumbW * 0.58))
-            let aspectWidth = min(thumbW, thumbH * windowAspect)
-            let tileThumbW = windowAspect < cardAspect * 1.08
-                ? max(minTileW, aspectWidth)
-                : thumbW
-            let x = slotX + (thumbW - tileThumbW) / 2
 
-            let cell = ThumbnailTileView(frame: NSRect(x: x, y: baseY, width: tileThumbW, height: cellH))
+            let cell = ThumbnailTileView(frame: NSRect(x: slotX, y: baseY, width: thumbW, height: cellH))
             cell.index = i
             cell.onClick = { [weak self] index in
                 guard let self = self, index < self.windows.count else { return }
@@ -838,27 +907,21 @@ class AltTabManager: NSObject {
             }
             cv.addSubview(cell); tileViews.append(cell)
 
-            let container = NSView(frame: NSRect(x: 0, y: layout.labelHeight + layout.labelGap, width: tileThumbW, height: thumbH))
+            let container = NSView(frame: NSRect(x: 0, y: layout.labelHeight + layout.labelGap, width: thumbW, height: thumbH))
             container.wantsLayer = true
             container.layer?.cornerRadius = 10
-            container.layer?.masksToBounds = false
+            container.layer?.masksToBounds = true
             container.layer?.backgroundColor = NSColor.clear.cgColor
             applySelectionStyle(to: container, selected: i == selectedIndex)
 
-            let iv = ThumbnailImageView(frame: container.bounds)
-            iv.imageScaling = .scaleProportionallyUpOrDown
+            let iv = NSImageView(frame: container.bounds)
             iv.imageAlignment = .alignCenter
-            iv.wantsLayer = true
-            iv.layer?.cornerRadius = 10
-            iv.layer?.masksToBounds = true
+            iv.imageScaling = .scaleProportionallyDown
 
-            // Cache first, then app icon until ScreenCaptureKit provides the preview.
             if let cached = ThumbnailCache.shared.get(win.windowID) {
-                iv.usesAspectFill = true
                 iv.image = cached
             } else if let icon = appIcon(for: win) {
-                iv.usesAspectFill = false
-                icon.size = NSSize(width: tileThumbW * 0.5, height: tileThumbW * 0.5)
+                icon.size = NSSize(width: thumbW * 0.5, height: thumbW * 0.5)
                 iv.image = icon
             }
 
@@ -867,20 +930,13 @@ class AltTabManager: NSObject {
             thumbnailViewsByWindowID[win.windowID] = iv
 
             let title = win.title.isEmpty ? win.appName : "\(win.appName) — \(win.title)"
-            let iconSize = min(16, max(12, layout.labelHeight - 4))
-            let iconView = NSImageView(frame: NSRect(x: 0, y: (layout.labelHeight - iconSize) / 2, width: iconSize, height: iconSize))
-            iconView.image = appIcon(for: win)
-            iconView.imageScaling = .scaleProportionallyUpOrDown
-            iconView.imageAlignment = .alignCenter
-            cell.addSubview(iconView); iconViews.append(iconView)
-
-            let lbl = NSTextField(labelWithString: title)
-            let labelX = iconSize + 6
-            lbl.frame = NSRect(x: labelX, y: baseY, width: max(20, tileThumbW - iconSize - 6), height: layout.labelHeight)
-            lbl.frame.origin.y = 0
-            lbl.alignment = .left; lbl.font = .systemFont(ofSize: max(11, min(13, layout.labelHeight - 6)))
-            lbl.textColor = labelTextColor(selected: i == selectedIndex, isDark: isDark)
-            lbl.lineBreakMode = .byTruncatingTail
+            let lbl = NSTextField(labelWithString: "")
+            lbl.frame = NSRect(x: 0, y: 0, width: thumbW, height: layout.labelHeight)
+            lbl.isBezeled = false
+            lbl.drawsBackground = false
+            lbl.isEditable = false
+            lbl.isSelectable = false
+            applyLabelStyle(lbl, title: title, selected: i == selectedIndex, isDark: isDark)
             cell.addSubview(lbl); labelViews.append(lbl)
         }
     }
@@ -900,7 +956,7 @@ class AltTabManager: NSObject {
                 let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
                 for win in self.windows {
                     guard !Task.isCancelled, self.isShowing else { return }
-                    if ThumbnailCache.shared.get(win.windowID) != nil { continue }
+                    if ThumbnailCache.shared.isFresh(win.windowID) { continue }
                     guard let scWin = content.windows.first(where: { $0.windowID == win.windowID }) else { continue }
                     await self.captureScreenshot(scWin, windowID: win.windowID, thumbW: thumbW, thumbH: thumbH)
                 }
@@ -912,14 +968,16 @@ class AltTabManager: NSObject {
         refreshTask?.cancel()
         refreshTask = Task { [weak self] in
             guard let self = self else { return }
+            var pass = 0
             while !Task.isCancelled && self.isShowing {
                 for win in self.windows {
                     guard !Task.isCancelled, self.isShowing else { return }
-                    if ThumbnailCache.shared.get(win.windowID) == nil {
-                        await self.captureSingle(win, thumbW: thumbW, thumbH: thumbH)
-                    }
+                    let shouldRefresh = pass > 0 || !ThumbnailCache.shared.isFresh(win.windowID)
+                    guard shouldRefresh else { continue }
+                    await self.captureSingle(win, thumbW: thumbW, thumbH: thumbH)
                 }
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                pass += 1
+                try? await Task.sleep(nanoseconds: 1_250_000_000)
             }
         }
     }
@@ -933,6 +991,20 @@ class AltTabManager: NSObject {
     }
 
     private func captureScreenshot(_ scWindow: SCWindow, windowID: CGWindowID, thumbW: CGFloat, thumbH: CGFloat) async {
+        for attempt in 0..<2 {
+            if let image = await captureScreenshotOnce(scWindow, thumbW: thumbW, thumbH: thumbH),
+               !isMostlyBlack(image) || attempt == 1 {
+                ThumbnailCache.shared.set(windowID, image: image)
+                DispatchQueue.main.async { [weak self] in self?.updateThumbnail(windowID: windowID, image: image) }
+                return
+            }
+            if attempt == 0 {
+                try? await Task.sleep(nanoseconds: 120_000_000)
+            }
+        }
+    }
+
+    private func captureScreenshotOnce(_ scWindow: SCWindow, thumbW: CGFloat, thumbH: CGFloat) async -> NSImage? {
         do {
             let config = SCStreamConfiguration()
             let windowSize = scWindow.frame.size
@@ -940,12 +1012,88 @@ class AltTabManager: NSObject {
             config.width = max(1, Int(windowSize.width * scale))
             config.height = max(1, Int(windowSize.height * scale))
             config.showsCursor = false
+            if #available(macOS 14.0, *) {
+                config.captureResolution = .best
+            }
             let filter = SCContentFilter(desktopIndependentWindow: scWindow)
             let cgImage = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
-            let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-            ThumbnailCache.shared.set(windowID, image: image)
-            DispatchQueue.main.async { [weak self] in self?.updateThumbnail(windowID: windowID, image: image) }
-        } catch {}
+            return makeDisplayImage(from: cgImage)
+        } catch {
+            return nil
+        }
+    }
+
+    private func makeDisplayImage(from cgImage: CGImage) -> NSImage {
+        let trimmed = croppedToVisibleContent(cgImage)
+        let rep = NSBitmapImageRep(cgImage: trimmed)
+        let image = NSImage(size: NSSize(width: rep.pixelsWide, height: rep.pixelsHigh))
+        image.addRepresentation(rep)
+        return image
+    }
+
+    /// Trims uniform dark/empty margins so aspect-fit centers visible window content, not capture padding.
+    private func croppedToVisibleContent(_ cgImage: CGImage) -> CGImage {
+        let rep = NSBitmapImageRep(cgImage: cgImage)
+        let width = rep.pixelsWide
+        let height = rep.pixelsHigh
+        guard width > 4, height > 4 else { return cgImage }
+
+        let step = max(1, min(width, height) / 56)
+        var minX = width, maxX = 0, minY = height, maxY = 0
+
+        for y in stride(from: 0, to: height, by: step) {
+            for x in stride(from: 0, to: width, by: step) {
+                guard let color = rep.colorAt(x: x, y: y) else { continue }
+                var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+                color.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+                guard alpha > 0.04 else { continue }
+                guard red > 0.055 || green > 0.055 || blue > 0.055 else { continue }
+
+                minX = min(minX, x)
+                maxX = max(maxX, x)
+                minY = min(minY, y)
+                maxY = max(maxY, y)
+            }
+        }
+
+        guard maxX > minX, maxY > minY else { return cgImage }
+
+        let pad = max(2, min(width, height) / 72)
+        let cropX = max(0, minX - pad)
+        let cropY = max(0, minY - pad)
+        let cropW = min(width - cropX, maxX - minX + 1 + pad * 2)
+        let cropH = min(height - cropY, maxY - minY + 1 + pad * 2)
+        let cropRect = CGRect(x: cropX, y: cropY, width: cropW, height: cropH)
+
+        return cgImage.cropping(to: cropRect) ?? cgImage
+    }
+
+    private func isMostlyBlack(_ image: NSImage) -> Bool {
+        guard let tiff = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff) else { return false }
+
+        let sampleSize = 8
+        let width = max(1, bitmap.pixelsWide)
+        let height = max(1, bitmap.pixelsHigh)
+        var darkSamples = 0
+        var totalSamples = 0
+
+        for row in 0..<sampleSize {
+            for col in 0..<sampleSize {
+                let x = col * max(0, width - 1) / max(1, sampleSize - 1)
+                let y = row * max(0, height - 1) / max(1, sampleSize - 1)
+                guard let color = bitmap.colorAt(x: x, y: y) else { continue }
+                totalSamples += 1
+                var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+                color.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+                if alpha > 0.05, red < 0.08, green < 0.08, blue < 0.08 {
+                    darkSamples += 1
+                }
+            }
+        }
+
+        guard totalSamples > 0 else { return false }
+        return Double(darkSamples) / Double(totalSamples) > 0.82
     }
 
     func getVisibleApps() -> [String] {
@@ -961,7 +1109,7 @@ class AltTabManager: NSObject {
             applySelectionStyle(to: v.superview, selected: i == selectedIndex)
         }
         for (i, l) in labelViews.enumerated() {
-            l.textColor = labelTextColor(selected: i == selectedIndex, isDark: isDark)
+            applyLabelStyle(l, title: l.stringValue, selected: i == selectedIndex, isDark: isDark)
         }
         scrollSelectedTileIntoView()
     }
@@ -1156,7 +1304,7 @@ class AltTabManager: NSObject {
             optimisticallyClosingWindowIDs.removeAll()
         }
         altTabPanel?.orderOut(nil); altTabPanel = nil
-        thumbnailViews.removeAll(); thumbnailViewsByWindowID.removeAll(); labelViews.removeAll(); iconViews.removeAll(); tileViews.removeAll()
+        thumbnailViews.removeAll(); thumbnailViewsByWindowID.removeAll(); labelViews.removeAll(); tileViews.removeAll()
     }
 
     private func activateWindow(_ window: WindowInfo) {
@@ -1275,61 +1423,7 @@ class AltTabManager: NSObject {
 extension AltTabManager {
     func updateThumbnail(windowID: CGWindowID, image: NSImage) {
         guard isShowing, let thumbnailView = thumbnailViewsByWindowID[windowID] else { return }
-        thumbnailView.usesAspectFill = true
         thumbnailView.image = image
-    }
-}
-
-private class ThumbnailImageView: NSImageView {
-    var usesAspectFill = false {
-        didSet { needsDisplay = true }
-    }
-
-    override var image: NSImage? {
-        didSet { needsDisplay = true }
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        guard usesAspectFill, let image else {
-            super.draw(dirtyRect)
-            return
-        }
-
-        let imageSize = image.size
-        guard imageSize.width > 0, imageSize.height > 0, bounds.width > 0, bounds.height > 0 else { return }
-
-        let imageAspect = imageSize.width / imageSize.height
-        let viewAspect = bounds.width / bounds.height
-        let aspectDelta = max(imageAspect, viewAspect) / max(0.01, min(imageAspect, viewAspect))
-
-        if aspectDelta > 1.20 {
-            drawAspectFitPreview(image, imageSize)
-            return
-        }
-
-        let drawSourceRect: NSRect
-        if imageAspect > viewAspect {
-            let cropWidth = imageSize.height * viewAspect
-            drawSourceRect = NSRect(x: (imageSize.width - cropWidth) / 2, y: 0, width: cropWidth, height: imageSize.height)
-        } else {
-            let cropHeight = imageSize.width / viewAspect
-            drawSourceRect = NSRect(x: 0, y: (imageSize.height - cropHeight) / 2, width: imageSize.width, height: cropHeight)
-        }
-
-        image.draw(in: bounds, from: drawSourceRect, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high])
-    }
-
-    private func drawAspectFitPreview(_ image: NSImage, _ imageSize: NSSize) {
-        let scale = min(bounds.width / imageSize.width, bounds.height / imageSize.height)
-        let fittedSize = NSSize(width: imageSize.width * scale, height: imageSize.height * scale)
-        let fittedRect = NSRect(
-            x: (bounds.width - fittedSize.width) / 2,
-            y: (bounds.height - fittedSize.height) / 2,
-            width: fittedSize.width,
-            height: fittedSize.height
-        )
-
-        image.draw(in: fittedRect, from: NSRect(origin: .zero, size: imageSize), operation: .sourceOver, fraction: 1, respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high])
     }
 }
 
