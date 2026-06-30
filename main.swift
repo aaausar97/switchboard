@@ -6,6 +6,7 @@ class MenuBarController: NSObject, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private let audioRecorder = SystemAudioRecorder()
     private let audioDownloader = AudioDownloader.shared
+    private let dictationManager = DictationManager()
     let altTabManager = AltTabManager()
     private var recordingMenuItem: NSMenuItem!
     private var durationMenuItem: NSMenuItem!
@@ -15,12 +16,20 @@ class MenuBarController: NSObject, NSMenuDelegate {
     private var cancelDownloadMenuItem: NSMenuItem!
     private var updateTimer: Timer?
     private var hideAppsMenuItem: NSMenuItem?
+    private var dictationStatusMenuItem: NSMenuItem?
 
     override init() {
         super.init()
         setupMenuBar()
+        wireDictationHotkeys()
         updateTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.tick() }
         if let t = updateTimer { RunLoop.main.add(t, forMode: .common) }
+    }
+
+    private func wireDictationHotkeys() {
+        altTabManager.onOptionSpaceDown = { [weak self] in self?.dictationManager.spaceDown() }
+        altTabManager.onOptionSpaceUp = { [weak self] in self?.dictationManager.spaceUp() }
+        altTabManager.onOptionReleasedDuringDictation = { [weak self] in self?.dictationManager.optionReleased() }
     }
     deinit { updateTimer?.invalidate() }
 
@@ -47,6 +56,22 @@ class MenuBarController: NSObject, NSMenuDelegate {
 
         hideAppsMenuItem = NSMenuItem(title: "  Hide Apps from Option-Tab", action: nil, keyEquivalent: "")
         menu.addItem(hideAppsMenuItem!)
+
+        menu.addItem(.separator())
+
+        // Dictation
+        let hdrDictation = NSMenuItem(title: "DICTATION", action: nil, keyEquivalent: "")
+        hdrDictation.attributedTitle = NSAttributedString(string: "DICTATION",
+            attributes: [.font: NSFont.systemFont(ofSize: 11, weight: .bold), .foregroundColor: NSColor.secondaryLabelColor])
+        menu.addItem(hdrDictation)
+
+        let dictation = NSMenuItem(title: "  Hold ⌥Space to Dictate", action: nil, keyEquivalent: "")
+        dictation.toolTip = "Offline speech-to-text via whisper-small"
+        menu.addItem(dictation)
+
+        dictationStatusMenuItem = NSMenuItem(title: "  Checking setup…", action: nil, keyEquivalent: "")
+        dictationStatusMenuItem?.isEnabled = false
+        menu.addItem(dictationStatusMenuItem!)
 
         menu.addItem(.separator())
 
@@ -93,6 +118,13 @@ class MenuBarController: NSObject, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         hideAppsMenuItem?.submenu = buildHideAppsMenu()
         updateDownloadMenuState()
+        updateDictationMenuState()
+    }
+
+    private func updateDictationMenuState() {
+        let status = dictationManager.setupStatus
+        dictationStatusMenuItem?.title = "  \(status.detail)"
+        dictationStatusMenuItem?.toolTip = status.tooltip
     }
 
     private func updateDownloadMenuState() {
@@ -303,14 +335,15 @@ class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func showAbout() {
         let a = NSAlert()
-        a.messageText = "Switchboard v2.1.0"
-        a.informativeText = "⌥⇥  Windows-style Option-Tab switcher\n⏺  System audio recorder\n⬇︎  Audio URL downloader\n\nBuilt with Swift."
+        a.messageText = "Switchboard v2.2.0"
+        a.informativeText = "⌥⇥  Windows-style Option-Tab switcher\n⌥Space  Hold to dictate (whisper-small)\n⏺  System audio recorder\n⬇︎  Audio URL downloader\n\nBuilt with Swift."
         a.addButton(withTitle: "OK"); a.runModal()
     }
 
     @objc private func quit() {
         if AppState.shared.isRecording { audioRecorder.stopRecording() }
         if audioDownloader.isDownloading { audioDownloader.cancelDownload() }
+        dictationManager.cancelIfNeeded()
         NSApp.terminate(nil)
     }
 }

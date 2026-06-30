@@ -26,5 +26,7 @@
     <string>Switchboard needs Accessibility permission for the Option-Tab hotkey.</string>
     <key>NSScreenCaptureUsageDescription</key>
     <string>Switchboard captures window thumbnails and system audio.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Switchboard records your voice for offline dictation.</string>
 </dict>
 </plist>

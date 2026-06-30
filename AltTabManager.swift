@@ -314,6 +314,11 @@ class AltTabManager: NSObject {
     private var isHandlingPermissionLoss = false
     private var optimisticallyClosingWindowIDs = Set<CGWindowID>()
     private var dismissSwitcherOnOptionRelease = false
+    private var dictationSpaceHeld = false
+
+    var onOptionSpaceDown: (() -> Void)?
+    var onOptionSpaceUp: (() -> Void)?
+    var onOptionReleasedDuringDictation: (() -> Void)?
 
     override init() {
         super.init()
@@ -339,6 +344,7 @@ class AltTabManager: NSObject {
         guard eventTap == nil else { return }
         let mask = CGEventMask(
             (1 << CGEventType.keyDown.rawValue) |
+            (1 << CGEventType.keyUp.rawValue) |
             (1 << CGEventType.flagsChanged.rawValue) |
             (1 << CGEventType.leftMouseDown.rawValue) |
             (1 << CGEventType.mouseMoved.rawValue)
@@ -351,7 +357,7 @@ class AltTabManager: NSObject {
         eventTap = tap; eventTapSource = source
         CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
-        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
+        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { [weak self] event in
             self?.handleGlobalNSEvent(event)
         }
         registerCarbonHotkey()
@@ -500,6 +506,16 @@ class AltTabManager: NSObject {
             DispatchQueue.main.async { [weak self] in self?.closeSelectedWindow() }
             return
         }
+        if !isShowing, event.modifierFlags.contains(.option), event.keyCode == 49 {
+            if event.type == .keyDown {
+                dictationSpaceHeld = true
+                DispatchQueue.main.async { [weak self] in self?.onOptionSpaceDown?() }
+            } else if event.type == .keyUp, dictationSpaceHeld {
+                dictationSpaceHeld = false
+                DispatchQueue.main.async { [weak self] in self?.onOptionSpaceUp?() }
+            }
+            return
+        }
         guard event.type == .keyDown,
               event.keyCode == 48,
               event.modifierFlags.contains(.option) else { return }
@@ -550,14 +566,32 @@ class AltTabManager: NSObject {
         }
         if type == .flagsChanged {
             let optionNow = event.flags.contains(.maskAlternate)
+            if !optionNow, dictationSpaceHeld {
+                dictationSpaceHeld = false
+                DispatchQueue.main.async { [weak self] in self?.onOptionReleasedDuringDictation?() }
+                return nil
+            }
             if handleModifierFlagsChanged(optionDown: optionNow) {
                 return nil
             }
             return Unmanaged.passRetained(event)
         }
+        if type == .keyUp {
+            let kc = event.getIntegerValueField(.keyboardEventKeycode)
+            if kc == 49, dictationSpaceHeld {
+                dictationSpaceHeld = false
+                DispatchQueue.main.async { [weak self] in self?.onOptionSpaceUp?() }
+                return nil
+            }
+        }
         if type == .keyDown {
             let kc = event.getIntegerValueField(.keyboardEventKeycode)
             let optionDown = event.flags.contains(.maskAlternate) || optionKeyHeld
+            if !isShowing, optionDown, kc == 49 {
+                dictationSpaceHeld = true
+                DispatchQueue.main.async { [weak self] in self?.onOptionSpaceDown?() }
+                return nil
+            }
             if optionDown && kc == 48 {
                 triggerOptionTab()
                 return nil

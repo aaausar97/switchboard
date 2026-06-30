@@ -14,6 +14,7 @@ swiftc -o "$EXECUTABLE" \
   "$ROOT_DIR/AltTabManager.swift" \
   "$ROOT_DIR/AudioRecorder.swift" \
   "$ROOT_DIR/AudioDownloader.swift" \
+  "$ROOT_DIR/DictationManager.swift" \
   -framework Cocoa \
   -framework Carbon \
   -framework CoreGraphics \
