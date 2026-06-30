@@ -15,12 +15,12 @@ Switchboard is a lightweight macOS menu bar utility for power-user workflows.
 
 ### Dictation (Handy-style)
 
-- **Hold ⌥Space** anywhere to dictate — works like [Handy](https://handy.computer) / Whisper push-to-talk
+- **Hold ⌥ + Space** anywhere to dictate — works like [Handy](https://handy.computer) / Whisper push-to-talk
 - Offline speech-to-text via [whisper.cpp](https://github.com/ggerganov/whisper.cpp) (`whisper-small` model)
 - Bottom-screen overlay shows **Listening…** and **Transcribing…** states
 - Transcribed text is pasted into the focused app automatically (⌘V)
 - Releasing ⌥ while holding Space also ends the recording
-- Menu shows live setup status (`whisper-small · offline · ready` or install instructions)
+- Setup hints appear in the menu only when whisper-cli or the model is missing
 
 ### Audio
 
@@ -106,11 +106,11 @@ APP_PATH="$HOME/Applications/Switchboard.app" ./build.sh
 
 ## Permissions
 
-On first launch, grant **Accessibility** in System Settings so Switchboard can listen for ⌥⇥, ⌥Space dictation, and activate windows.
+On first launch, grant **Accessibility** in System Settings so Switchboard can listen for ⌥⇥, ⌥ + Space dictation, and activate windows.
 
 **Screen Recording** is used for thumbnails and system audio capture. macOS may require relaunching Switchboard after granting or resetting this permission.
 
-**Microphone** is used only for offline dictation while you hold ⌥Space.
+**Microphone** is used only for offline dictation while you hold ⌥ + Space.
 
 If Screen Recording gets stuck during development:
 
@@ -121,7 +121,7 @@ tccutil reset ScreenCapture com.ausarmundra.switchboard
 ## Project Layout
 
 - `main.swift` — menu bar UI, app lifecycle, download dialogs, and menu actions
-- `AltTabManager.swift` — Option-Tab switcher, global hotkeys (including ⌥Space), window discovery, thumbnail layout, permissions, and activation
+- `AltTabManager.swift` — Option-Tab switcher, global hotkeys (including ⌥ + Space), window discovery, thumbnail layout, permissions, and activation
 - `DictationManager.swift` — offline whisper.cpp dictation, overlay UI, and auto-paste
 - `AudioRecorder.swift` — ScreenCaptureKit system audio recorder
 - `AudioDownloader.swift` — URL audio downloader (direct files via URLSession, media pages via yt-dlp)

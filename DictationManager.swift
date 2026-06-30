@@ -6,11 +6,6 @@ import Cocoa
 final class DictationManager: NSObject {
     static let minHoldDuration: TimeInterval = 0.3
 
-    struct SetupStatus {
-        let detail: String
-        let tooltip: String
-    }
-
     private let modelPath = NSHomeDirectory() + "/.whisper/models/ggml-small.bin"
     private let searchPaths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
 
@@ -23,23 +18,20 @@ final class DictationManager: NSObject {
     private(set) var isRecording = false
     private(set) var isTranscribing = false
 
-    var setupStatus: SetupStatus {
+    var setupIssue: (detail: String, tooltip: String)? {
         if findWhisperCLI() == nil {
-            return SetupStatus(
+            return (
                 detail: "Setup: brew install whisper-cpp",
                 tooltip: "whisper-cli not found in /opt/homebrew/bin or /usr/local/bin"
             )
         }
         if !FileManager.default.fileExists(atPath: modelPath) {
-            return SetupStatus(
+            return (
                 detail: "Setup: add ggml-small.bin to ~/.whisper/models",
                 tooltip: "Download from huggingface.co/ggerganov/whisper.cpp"
             )
         }
-        return SetupStatus(
-            detail: "whisper-small · offline · ready",
-            tooltip: "Hold ⌥Space anywhere to dictate"
-        )
+        return nil
     }
 
     func spaceDown() {

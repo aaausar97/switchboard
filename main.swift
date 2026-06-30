@@ -65,12 +65,13 @@ class MenuBarController: NSObject, NSMenuDelegate {
             attributes: [.font: NSFont.systemFont(ofSize: 11, weight: .bold), .foregroundColor: NSColor.secondaryLabelColor])
         menu.addItem(hdrDictation)
 
-        let dictation = NSMenuItem(title: "  Hold ⌥Space to Dictate", action: nil, keyEquivalent: "")
+        let dictation = NSMenuItem(title: "  Hold ⌥ + Space to Dictate", action: nil, keyEquivalent: "")
         dictation.toolTip = "Offline speech-to-text via whisper-small"
         menu.addItem(dictation)
 
-        dictationStatusMenuItem = NSMenuItem(title: "  Checking setup…", action: nil, keyEquivalent: "")
+        dictationStatusMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         dictationStatusMenuItem?.isEnabled = false
+        dictationStatusMenuItem?.isHidden = true
         menu.addItem(dictationStatusMenuItem!)
 
         menu.addItem(.separator())
@@ -122,9 +123,13 @@ class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func updateDictationMenuState() {
-        let status = dictationManager.setupStatus
-        dictationStatusMenuItem?.title = "  \(status.detail)"
-        dictationStatusMenuItem?.toolTip = status.tooltip
+        guard let issue = dictationManager.setupIssue else {
+            dictationStatusMenuItem?.isHidden = true
+            return
+        }
+        dictationStatusMenuItem?.isHidden = false
+        dictationStatusMenuItem?.title = "  \(issue.detail)"
+        dictationStatusMenuItem?.toolTip = issue.tooltip
     }
 
     private func updateDownloadMenuState() {
@@ -336,7 +341,7 @@ class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func showAbout() {
         let a = NSAlert()
         a.messageText = "Switchboard v2.2.0"
-        a.informativeText = "⌥⇥  Windows-style Option-Tab switcher\n⌥Space  Hold to dictate (whisper-small)\n⏺  System audio recorder\n⬇︎  Audio URL downloader\n\nBuilt with Swift."
+        a.informativeText = "⌥⇥  Windows-style Option-Tab switcher\n⌥ + Space  Hold to dictate\n⏺  System audio recorder\n⬇︎  Audio URL downloader\n\nBuilt with Swift."
         a.addButton(withTitle: "OK"); a.runModal()
     }
 
