@@ -91,7 +91,7 @@ final class DictationManager: NSObject {
             }
             startedAt = Date()
             isRecording = true
-            overlay.show("Listening…")
+            overlay.showListening()
         } catch {
             overlay.flash("Microphone permission required")
             cleanupRecordingFile()
@@ -112,7 +112,7 @@ final class DictationManager: NSObject {
         }
 
         isTranscribing = true
-        overlay.show("Transcribing…")
+        overlay.showTranscribing()
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.transcribe(wav: wav)
@@ -201,35 +201,30 @@ final class DictationManager: NSObject {
 // MARK: - Bottom overlay
 
 private final class DictationOverlay {
+    private enum Mode { case listening, transcribing }
+
     private var panel: NSPanel?
     private var effectView: NSVisualEffectView?
+    private var iconView: NSImageView?
     private var label: NSTextField?
     private var dot: NSView?
     private var flashTimer: Timer?
 
-    private let font = NSFont.systemFont(ofSize: 13, weight: .medium)
-    private let dotSize: CGFloat = 7
-    private let gap: CGFloat = 8
-    private let padH: CGFloat = 24
-    private let padV: CGFloat = 12
-    private let rowHeight: CGFloat = 18
+    private let dotSize: CGFloat = 8
+    private let iconSize: CGFloat = 17
+    private let gap: CGFloat = 7
+    private let pillW: CGFloat = 54
+    private let pillH: CGFloat = 38
+    private let font = NSFont.systemFont(ofSize: 12, weight: .medium)
 
-    func show(_ text: String) {
-        DispatchQueue.main.async { [self] in
-            flashTimer?.invalidate()
-            flashTimer = nil
-            let p = panel ?? makePanel()
-            panel = p
-            layout(text: text, isError: false)
-            p.orderFrontRegardless()
-        }
-    }
+    func showListening() { show(.listening) }
+    func showTranscribing() { show(.transcribing) }
 
     func flash(_ text: String) {
         DispatchQueue.main.async { [self] in
             let p = panel ?? makePanel()
             panel = p
-            layout(text: text, isError: true)
+            layoutMessage(text)
             p.orderFrontRegardless()
             flashTimer?.invalidate()
             flashTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
@@ -246,64 +241,66 @@ private final class DictationOverlay {
         }
     }
 
-    private func layout(text: String, isError: Bool) {
-        guard let p = panel, let effect = effectView, let dot, let label else { return }
+    private func show(_ mode: Mode) {
+        DispatchQueue.main.async { [self] in
+            flashTimer?.invalidate()
+            flashTimer = nil
+            let p = panel ?? makePanel()
+            panel = p
+            layoutIcon(mode)
+            p.orderFrontRegardless()
+        }
+    }
 
+    private func layoutIcon(_ mode: Mode) {
+        guard let p = panel, let effect = effectView, let dot, let iconView, let label else { return }
+
+        label.isHidden = true
+        iconView.isHidden = false
+        dot.isHidden = false
+
+        let symbol = mode == .listening ? "mic.fill" : "text.word.spacing"
+        let config = NSImage.SymbolConfiguration(pointSize: iconSize, weight: .medium)
+        iconView.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(config)
+        iconView.contentTintColor = .labelColor
+        dot.layer?.backgroundColor = (mode == .listening ? NSColor.systemRed : NSColor.systemYellow).cgColor
+
+        placePill(width: pillW, height: pillH, on: p, effect: effect)
+
+        let contentW = dotSize + gap + iconSize
+        let startX = (pillW - contentW) / 2
+        let midY = pillH / 2
+        dot.frame = NSRect(x: startX, y: midY - dotSize / 2, width: dotSize, height: dotSize)
+        iconView.frame = NSRect(x: startX + dotSize + gap, y: midY - iconSize / 2, width: iconSize, height: iconSize)
+    }
+
+    private func layoutMessage(_ text: String) {
+        guard let p = panel, let effect = effectView, let dot, let iconView, let label else { return }
+
+        iconView.isHidden = true
+        dot.isHidden = true
+        label.isHidden = false
         label.stringValue = text
         label.font = font
-        label.textColor = isError ? .secondaryLabelColor : .labelColor
-        label.alignment = .center
+        label.textColor = .secondaryLabelColor
 
         let visible = overlayVisibleFrame()
-        let maxTextW = max(120, visible.width * 0.72 - padH * 2)
-        let showDot = !isError
-        let availableTextW = showDot ? maxTextW - dotSize - gap : maxTextW
+        let maxW = min(320, visible.width * 0.72)
+        let textW = min(maxW, ceil((text as NSString).size(withAttributes: [.font: font]).width) + 6)
+        let width = max(pillW, textW + 28)
+        let height = pillH
 
-        let attrs: [NSAttributedString.Key: Any] = [.font: font]
-        let naturalW = ceil((text as NSString).size(withAttributes: attrs).width)
-        let wraps = naturalW > availableTextW
+        placePill(width: width, height: height, on: p, effect: effect)
+        label.frame = NSRect(x: 14, y: (height - 16) / 2, width: width - 28, height: 16)
+    }
 
-        label.lineBreakMode = wraps ? .byWordWrapping : .byClipping
-        label.maximumNumberOfLines = wraps ? 2 : 1
-
-        let textW = wraps
-            ? availableTextW
-            : min(naturalW + 4, availableTextW)
-        let textH = wraps
-            ? ceil((text as NSString).boundingRect(
-                with: CGSize(width: textW, height: .greatestFiniteMagnitude),
-                options: [.usesLineFragmentOrigin, .usesFontLeading],
-                attributes: attrs,
-                context: nil
-            ).height)
-            : rowHeight
-
-        let contentW = (showDot ? dotSize + gap : 0) + textW
-        let width = min(visible.width - 48, max(168, contentW + padH * 2))
-        let height = max(40, textH + padV * 2)
-
+    private func placePill(width: CGFloat, height: CGFloat, on p: NSPanel, effect: NSVisualEffectView) {
+        let visible = overlayVisibleFrame()
         let frame = NSRect(x: visible.midX - width / 2, y: visible.minY + 32, width: width, height: height)
         p.setFrame(frame, display: true)
         effect.frame = NSRect(origin: .zero, size: frame.size)
         effect.layer?.cornerRadius = height / 2
-
-        let startX = (width - contentW) / 2
-        let blockTop = (height - textH) / 2
-
-        dot.isHidden = !showDot
-        if showDot {
-            dot.frame = NSRect(x: startX, y: blockTop + (textH - dotSize) / 2, width: dotSize, height: dotSize)
-            dot.layer?.backgroundColor = dotColor(for: text, isError: isError).cgColor
-        }
-
-        let labelX = showDot ? startX + dotSize + gap : startX
-        label.frame = NSRect(x: labelX, y: blockTop, width: textW, height: textH)
-    }
-
-    private func dotColor(for text: String, isError: Bool) -> NSColor {
-        if isError { return .systemYellow }
-        if text.hasPrefix("Transcrib") { return .systemOrange }
-        return .systemRed
     }
 
     private func overlayVisibleFrame() -> NSRect {
@@ -328,7 +325,6 @@ private final class DictationOverlay {
         effect.blendingMode = .behindWindow
         effect.state = .active
         effect.wantsLayer = true
-        effect.layer?.cornerRadius = 20
         effect.layer?.masksToBounds = true
         effect.layer?.borderWidth = 0.5
         effect.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
@@ -340,14 +336,18 @@ private final class DictationOverlay {
         effect.addSubview(dotView)
         dot = dotView
 
+        let icon = NSImageView(frame: .zero)
+        icon.imageScaling = .scaleProportionallyDown
+        effect.addSubview(icon)
+        iconView = icon
+
         let lbl = NSTextField(labelWithString: "")
-        lbl.font = font
         lbl.isBezeled = false
         lbl.drawsBackground = false
         lbl.isEditable = false
-        lbl.lineBreakMode = .byClipping
         lbl.alignment = .center
-        lbl.cell?.truncatesLastVisibleLine = false
+        lbl.lineBreakMode = .byTruncatingTail
+        lbl.isHidden = true
         effect.addSubview(lbl)
         label = lbl
 

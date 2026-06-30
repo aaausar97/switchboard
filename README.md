@@ -8,50 +8,55 @@ Switchboard is a lightweight macOS menu bar utility for power-user workflows.
 
 ### Window Switcher
 
-- Option-Tab switcher with adaptive live thumbnails
+- **⌥⇥** — Windows-style Option-Tab switcher with adaptive live thumbnails
 - Mouse and keyboard selection for switching windows
 - Per-window activation for apps with multiple windows
-- Hide Apps submenu to exclude apps from the switcher (persisted across launches)
+- **Hide Apps from Option-Tab** submenu to exclude apps (persisted across launches)
 
-### Dictation (Handy-style)
+### Dictation
 
-- **Hold ⌥ + Space** anywhere to dictate — works like [Handy](https://handy.computer) / Whisper push-to-talk
-- Offline speech-to-text via [whisper.cpp](https://github.com/ggerganov/whisper.cpp) (`whisper-small` model)
-- Bottom-screen overlay shows **Listening…** and **Transcribing…** states
+Handy-style offline push-to-talk dictation powered by [whisper.cpp](https://github.com/ggerganov/whisper.cpp).
+
+- **Hold ⌥ + Space** anywhere to dictate
+- Uses the `whisper-small` model (`ggml-small.bin`) — fully offline, no cloud
+- Compact bottom-center **notification pill** while active:
+  - **Listening** — red dot + microphone icon
+  - **Transcribing** — yellow dot + text icon
+  - **Errors** — short text message (missing setup, permissions, failures) that auto-dismisses
 - Transcribed text is pasted into the focused app automatically (⌘V)
-- Releasing ⌥ while holding Space also ends the recording
-- Setup hints appear in the menu only when whisper-cli or the model is missing
+- Releasing ⌥ while still holding Space also ends the recording
+- Menu shows setup hints only when `whisper-cli` or the model is missing
 
 ### Audio
 
-- System audio recorder — saves recordings to `~/Downloads/Switchboard`
-- **Audio URL downloader** — download audio straight from a URL into the same folder
-  - **YouTube, Vimeo, SoundCloud, Bandcamp**, and many other media pages via [yt-dlp](https://github.com/yt-dlp/yt-dlp) + ffmpeg
-  - Direct audio file links (`.mp3`, `.m4a`, `.wav`, etc.) via built-in download — no extra tools required
-  - **Download from Clipboard** (`⌘D`) — detects a copied `http`/`https` link and shows the host in the menu
+- **Record System Audio** (`⌘R`) — ScreenCaptureKit capture saved to `~/Downloads/Switchboard` as `.m4a`
+- **Audio URL downloader** — save audio from a URL into the same folder
+  - Media pages (**YouTube**, Vimeo, SoundCloud, Bandcamp, etc.) via [yt-dlp](https://github.com/yt-dlp/yt-dlp) + ffmpeg
+  - Direct file links (`.mp3`, `.m4a`, `.wav`, etc.) — no extra tools required
+  - **Download from Clipboard** (`⌘D`) — detects a copied URL and shows the host in the menu
   - **Enter URL…** (`⌘⇧D`) — paste or type a link in a dialog with working ⌘V/C/A/X/Z shortcuts
-  - Live progress in the menu bar and menu while downloading, with cancel support
+  - Live progress in the menu bar and menu, with cancel support
   - Clear errors for DRM-protected sources (Spotify, Apple Music) and common yt-dlp failures
+- **Open Switchboard Folder** — opens `~/Downloads/Switchboard` in Finder
 
-### Menu Bar UI
+### Menu Bar
 
-- Organized **WINDOW SWITCHER**, **DICTATION**, and **AUDIO** sections
-- Status bar shows recording duration (`⏺ 00:42`) or download progress (`⬇︎ 73%`) while active
-- **Open Switchboard Folder** shortcut to jump to `~/Downloads/Switchboard`
+- Sections: **WINDOW SWITCHER**, **DICTATION**, **AUDIO**
+- Status icon shows recording duration (`⏺ 00:42`) or download progress (`⬇︎ 73%`) while active
 
 ## Requirements
 
-- macOS 14.2 or newer
+- macOS 14.2+
 - Swift toolchain / Xcode Command Line Tools
-- Accessibility permission for Option-Tab, Option-Space dictation, and window activation
-- Screen Recording permission for live window thumbnails and system audio capture
-- Microphone permission for dictation
+- **Accessibility** — Option-Tab, ⌥ + Space dictation, and window activation
+- **Screen Recording** — live window thumbnails and system audio capture
+- **Microphone** — offline dictation only (while holding ⌥ + Space)
 
-Switchboard still opens without Screen Recording permission, but thumbnails may fall back to app icons until permission is granted.
+Switchboard opens without Screen Recording permission, but thumbnails fall back to app icons until it is granted.
 
-### Optional: Offline Dictation
+## Optional Setup
 
-Install whisper.cpp and download the small English model:
+### Offline Dictation
 
 ```sh
 brew install whisper-cpp
@@ -62,19 +67,15 @@ curl -L -o ~/.whisper/models/ggml-small.bin \
 
 Switchboard looks for `whisper-cli` in `/opt/homebrew/bin`, `/usr/local/bin`, or `/usr/bin`, and the model at `~/.whisper/models/ggml-small.bin`.
 
-### Optional: Audio URL Downloads (YouTube & media pages)
-
-To download from YouTube, SoundCloud, and other media pages, install yt-dlp and ffmpeg:
+### Audio URL Downloads
 
 ```sh
 brew install yt-dlp ffmpeg
 ```
 
-Direct audio file URLs work without any additional tools.
+Direct audio file URLs work without additional tools. Spotify and Apple Music catalog URLs are DRM-protected and cannot be downloaded — Switchboard shows a clear error.
 
-Spotify and Apple Music catalog URLs use DRM-protected streams and cannot be downloaded as audio files. Switchboard will show a clear error for those sources.
-
-If YouTube downloads start failing after a platform change, update yt-dlp:
+If YouTube downloads break after a platform change:
 
 ```sh
 brew upgrade yt-dlp
@@ -92,13 +93,9 @@ Build, install, sign, and launch:
 ./build.sh --launch
 ```
 
-By default, the script installs to:
+Default install path: `/Applications/Switchboard.app`
 
-```sh
-/Applications/Switchboard.app
-```
-
-To install somewhere else:
+Custom path:
 
 ```sh
 APP_PATH="$HOME/Applications/Switchboard.app" ./build.sh
@@ -106,13 +103,17 @@ APP_PATH="$HOME/Applications/Switchboard.app" ./build.sh
 
 ## Permissions
 
-On first launch, grant **Accessibility** in System Settings so Switchboard can listen for ⌥⇥, ⌥ + Space dictation, and activate windows.
+Grant permissions in **System Settings** on first launch:
 
-**Screen Recording** is used for thumbnails and system audio capture. macOS may require relaunching Switchboard after granting or resetting this permission.
+| Permission | Used for |
+|---|---|
+| Accessibility | ⌥⇥ switcher, ⌥ + Space dictation, window activation |
+| Screen Recording | Window thumbnails, system audio recording |
+| Microphone | Voice capture during dictation |
 
-**Microphone** is used only for offline dictation while you hold ⌥ + Space.
+macOS may require relaunching Switchboard after granting Screen Recording.
 
-If Screen Recording gets stuck during development:
+Reset Screen Recording during development:
 
 ```sh
 tccutil reset ScreenCapture com.ausarmundra.switchboard
@@ -120,18 +121,20 @@ tccutil reset ScreenCapture com.ausarmundra.switchboard
 
 ## Project Layout
 
-- `main.swift` — menu bar UI, app lifecycle, download dialogs, and menu actions
-- `AltTabManager.swift` — Option-Tab switcher, global hotkeys (including ⌥ + Space), window discovery, thumbnail layout, permissions, and activation
-- `DictationManager.swift` — offline whisper.cpp dictation, overlay UI, and auto-paste
-- `AudioRecorder.swift` — ScreenCaptureKit system audio recorder
-- `AudioDownloader.swift` — URL audio downloader (direct files via URLSession, media pages via yt-dlp)
-- `Info.plist` — app bundle metadata and permissions descriptions
-- `Resources/` — app bundle assets
-- `build.sh` — local build/install/sign helper
+| File | Role |
+|---|---|
+| `main.swift` | Menu bar UI, app lifecycle, download dialogs |
+| `AltTabManager.swift` | Option-Tab switcher, global hotkeys, thumbnails, window activation |
+| `DictationManager.swift` | Offline whisper dictation, notification pill, auto-paste |
+| `AudioRecorder.swift` | ScreenCaptureKit system audio recorder |
+| `AudioDownloader.swift` | URL audio downloader (URLSession + yt-dlp) |
+| `Info.plist` | Bundle metadata and permission descriptions |
+| `Resources/` | App bundle assets |
+| `build.sh` | Build, install, and sign helper |
 
-## Roadmap Ideas
+## Roadmap
 
-- Additional dictation engines (e.g. parakeet, moonshine)
-- Split switcher/audio/dictation into smaller modules
-- Add more menu bar utility tools
-- Package with a first-class Xcode project or Swift Package layout
+- Additional dictation engines (parakeet, moonshine)
+- Split into smaller modules
+- More menu bar utilities
+- First-class Xcode project or Swift Package layout
