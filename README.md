@@ -9,6 +9,7 @@ Switchboard is a lightweight macOS menu bar utility for power-user workflows.
 ### Window Switcher
 
 - **⌥⇥** — Windows-style Option-Tab switcher with adaptive live thumbnails
+- **⌥W** — close the selected window while the switcher is open
 - Mouse and keyboard selection for switching windows
 - Per-window activation for apps with multiple windows
 - **Hide Apps from Option-Tab** submenu to exclude apps (persisted across launches)
@@ -65,7 +66,7 @@ curl -L -o ~/.whisper/models/ggml-small.bin \
   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
 ```
 
-Switchboard looks for `whisper-cli` in `/opt/homebrew/bin`, `/usr/local/bin`, or `/usr/bin`, and the model at `~/.whisper/models/ggml-small.bin`.
+Switchboard looks for `whisper-cli` via shared Homebrew-aware tool discovery (`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, `/bin`). The model must live at `~/.whisper/models/ggml-small.bin`.
 
 ### Audio URL Downloads
 
@@ -124,13 +125,15 @@ tccutil reset ScreenCapture com.ausarmundra.switchboard
 | File | Role |
 |---|---|
 | `main.swift` | Menu bar UI, app lifecycle, download dialogs |
-| `AltTabManager.swift` | Option-Tab switcher, global hotkeys, thumbnails, window activation |
+| `AltTabManager.swift` | Option-Tab switcher, CGEvent hotkeys, thumbnails, window activation |
 | `DictationManager.swift` | Offline whisper dictation, notification pill, auto-paste |
 | `AudioRecorder.swift` | ScreenCaptureKit system audio recorder |
-| `AudioDownloader.swift` | URL audio downloader (URLSession + yt-dlp) |
+| `AudioDownloader.swift` | URL audio downloader (URLSession + yt-dlp); `SwitchboardTools` shared CLI/PATH helpers |
 | `Info.plist` | Bundle metadata and permission descriptions |
 | `Resources/` | App bundle assets |
 | `build.sh` | Build, install, and sign helper |
+
+Hotkeys (⌥⇥, ⌥ + Space, ⌥W) are handled through a single Accessibility **CGEvent tap** — no Carbon dependency.
 
 ## Roadmap
 

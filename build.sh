@@ -16,7 +16,6 @@ swiftc -o "$EXECUTABLE" \
   "$ROOT_DIR/AudioDownloader.swift" \
   "$ROOT_DIR/DictationManager.swift" \
   -framework Cocoa \
-  -framework Carbon \
   -framework CoreGraphics \
   -framework AVFoundation \
   -framework ScreenCaptureKit \

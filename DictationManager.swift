@@ -7,7 +7,6 @@ final class DictationManager: NSObject {
     static let minHoldDuration: TimeInterval = 0.3
 
     private let modelPath = NSHomeDirectory() + "/.whisper/models/ggml-small.bin"
-    private let searchPaths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
 
     private var recorder: AVAudioRecorder?
     private var recordingURL: URL?
@@ -19,7 +18,7 @@ final class DictationManager: NSObject {
     private(set) var isTranscribing = false
 
     var setupIssue: (detail: String, tooltip: String)? {
-        if findWhisperCLI() == nil {
+        if SwitchboardTools.findExecutable("whisper-cli") == nil {
             return (
                 detail: "Setup: brew install whisper-cpp",
                 tooltip: "whisper-cli not found in /opt/homebrew/bin or /usr/local/bin"
@@ -36,7 +35,7 @@ final class DictationManager: NSObject {
 
     func spaceDown() {
         guard !isRecording, !isTranscribing else { return }
-        guard findWhisperCLI() != nil else {
+        guard SwitchboardTools.findExecutable("whisper-cli") != nil else {
             overlay.flash("Install whisper-cli")
             return
         }
@@ -128,7 +127,7 @@ final class DictationManager: NSObject {
             cleanupRecordingFile()
         }
 
-        guard let cli = findWhisperCLI() else { return }
+        guard let cli = SwitchboardTools.findExecutable("whisper-cli") else { return }
 
         let outBase = FileManager.default.temporaryDirectory
             .appendingPathComponent("switchboard-out-\(UUID().uuidString)").path
@@ -189,13 +188,6 @@ final class DictationManager: NSObject {
         recordingURL = nil
     }
 
-    private func findWhisperCLI() -> String? {
-        for dir in searchPaths {
-            let path = "\(dir)/whisper-cli"
-            if FileManager.default.isExecutableFile(atPath: path) { return path }
-        }
-        return nil
-    }
 }
 
 // MARK: - Bottom overlay

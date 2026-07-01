@@ -1,15 +1,13 @@
 import ApplicationServices
-import Carbon
 import Cocoa
 import CoreGraphics
 import ScreenCaptureKit
 
 // MARK: - App State
-class AppState: ObservableObject {
+class AppState {
     static let shared = AppState()
-    @Published var isRecording = false
-    @Published var recordingDuration: TimeInterval = 0
-    @Published var lastRecordingURL: URL?
+    var isRecording = false
+    var recordingDuration: TimeInterval = 0
 }
 
 // MARK: - Window Info
@@ -57,11 +55,6 @@ class ThumbnailCache {
         }
         cache[id] = image
         capturedAt[id] = Date()
-    }
-
-    func remove(_ id: CGWindowID) {
-        cache.removeValue(forKey: id)
-        capturedAt.removeValue(forKey: id)
     }
 }
 
@@ -131,14 +124,6 @@ class SwitchboardPermissions {
         requestMissingPermissions()
         showPermissionSetupAlert()
         startPermissionPolling()
-    }
-
-    static func showSetupAlertIfNeeded() {
-        guard !hasAccessibility || !hasScreenRecording else { return }
-        if !hasAccessibility { requestMissingPermissions() }
-        if !hasScreenRecording { requestScreenRecordingForThumbnails() }
-        showPermissionSetupAlert()
-        if !hasAccessibility { startPermissionPolling() }
     }
 
     static func showSwitcherBlockedAlertIfNeeded() {
@@ -307,9 +292,6 @@ class AltTabManager: NSObject {
     private var eventTap: CFMachPort?
     private var eventTapSource: CFRunLoopSource?
     private var globalKeyMonitor: Any?
-    private var hotKeyRef: EventHotKeyRef?
-    private var closeHotKeyRef: EventHotKeyRef?
-    private var hotKeyHandler: EventHandlerRef?
     private var permissionMonitorTimer: Timer?
     private var isHandlingPermissionLoss = false
     private var optimisticallyClosingWindowIDs = Set<CGWindowID>()
@@ -360,7 +342,6 @@ class AltTabManager: NSObject {
         globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { [weak self] event in
             self?.handleGlobalNSEvent(event)
         }
-        registerCarbonHotkey()
         startPermissionMonitor()
         print("Switchboard: hotkey ready")
     }
@@ -407,71 +388,14 @@ class AltTabManager: NSObject {
         if let globalKeyMonitor {
             NSEvent.removeMonitor(globalKeyMonitor)
         }
-        if let hotKeyRef {
-            UnregisterEventHotKey(hotKeyRef)
-        }
-        if let closeHotKeyRef {
-            UnregisterEventHotKey(closeHotKeyRef)
-        }
-        if let hotKeyHandler {
-            RemoveEventHandler(hotKeyHandler)
-        }
         eventTap = nil
         eventTapSource = nil
         globalKeyMonitor = nil
-        hotKeyRef = nil
-        closeHotKeyRef = nil
-        hotKeyHandler = nil
 
         if stopPermissionMonitor {
             permissionMonitorTimer?.invalidate()
             permissionMonitorTimer = nil
         }
-    }
-
-    private func registerCarbonHotkey() {
-        var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(
-            GetApplicationEventTarget(),
-            { _, event, userData in
-                guard let userData else { return noErr }
-                let manager = Unmanaged<AltTabManager>.fromOpaque(userData).takeUnretainedValue()
-                var hotKeyID = EventHotKeyID()
-                let status = GetEventParameter(
-                    event,
-                    EventParamName(kEventParamDirectObject),
-                    EventParamType(typeEventHotKeyID),
-                    nil,
-                    MemoryLayout<EventHotKeyID>.size,
-                    nil,
-                    &hotKeyID
-                )
-                guard status == noErr else { return status }
-
-                switch hotKeyID.id {
-                case 1:
-                    manager.triggerOptionTab()
-                case 2:
-                    manager.triggerOptionW()
-                default:
-                    break
-                }
-                return noErr
-            },
-            1,
-            &eventSpec,
-            Unmanaged.passUnretained(self).toOpaque(),
-            &hotKeyHandler
-        )
-
-        let hotKeyID = EventHotKeyID(signature: Self.fourCharCode("SWBD"), id: 1)
-        RegisterEventHotKey(UInt32(kVK_Tab), UInt32(optionKey), hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
-        let closeHotKeyID = EventHotKeyID(signature: Self.fourCharCode("SWBD"), id: 2)
-        RegisterEventHotKey(UInt32(kVK_ANSI_W), UInt32(optionKey), closeHotKeyID, GetApplicationEventTarget(), 0, &closeHotKeyRef)
-    }
-
-    private static func fourCharCode(_ value: String) -> OSType {
-        value.utf8.reduce(0) { ($0 << 8) + OSType($1) }
     }
 
     private func makeEventTap(at location: CGEventTapLocation, mask: CGEventMask) -> CFMachPort? {
@@ -722,38 +646,7 @@ class AltTabManager: NSObject {
         backdrop.layer?.borderWidth = 0.5
         backdrop.layer?.borderColor = NSColor.white.withAlphaComponent(isDark ? 0.14 : 0.22).cgColor
         shell.addSubview(backdrop)
-
-        let wash = NSView(frame: backdrop.bounds)
-        wash.autoresizingMask = [.width, .height]
-        wash.wantsLayer = true
-        wash.layer?.backgroundColor = panelWashColor(isDark: isDark).cgColor
-        backdrop.addSubview(wash)
-
-        let sheen = NSView(frame: backdrop.bounds)
-        sheen.autoresizingMask = [.width, .height]
-        sheen.wantsLayer = true
-        let gradient = CAGradientLayer()
-        gradient.frame = sheen.bounds
-        gradient.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
-        gradient.startPoint = CGPoint(x: 0.5, y: 1)
-        gradient.endPoint = CGPoint(x: 0.5, y: 0)
-        gradient.colors = [
-            NSColor.clear.cgColor,
-            NSColor.white.withAlphaComponent(isDark ? 0.03 : 0.06).cgColor,
-            NSColor.white.withAlphaComponent(isDark ? 0.06 : 0.10).cgColor,
-        ]
-        gradient.locations = [0, 0.55, 1]
-        sheen.layer?.addSublayer(gradient)
-        backdrop.addSubview(sheen)
-
         return shell
-    }
-
-    private func panelWashColor(isDark: Bool) -> NSColor {
-        if isDark {
-            return NSColor(white: 0.07, alpha: 0.09)
-        }
-        return NSColor.white.withAlphaComponent(0.07)
     }
 
     private func labelTextColor(selected: Bool, isDark: Bool) -> NSColor {
@@ -767,61 +660,13 @@ class AltTabManager: NSObject {
             : NSColor.black.withAlphaComponent(0.46)
     }
 
-    private func labelParagraphStyle() -> NSParagraphStyle {
-        let style = NSMutableParagraphStyle()
-        style.alignment = .center
-        style.lineBreakMode = .byTruncatingTail
-        return style
-    }
-
-    private func labelAttributes(
-        font: NSFont,
-        color: NSColor,
-        kern: CGFloat = -0.15
-    ) -> [NSAttributedString.Key: Any] {
-        [
-            .font: font,
-            .foregroundColor: color,
-            .kern: kern,
-            .paragraphStyle: labelParagraphStyle(),
-        ]
-    }
-
-    private func styledWindowLabel(_ title: String, selected: Bool, isDark: Bool) -> NSAttributedString {
-        let fontSize: CGFloat = 11.5
-        let primary = labelTextColor(selected: selected, isDark: isDark)
-        let separator = " — "
-
-        if let sepRange = title.range(of: separator) {
-            let appName = String(title[..<sepRange.lowerBound])
-            let windowTitle = String(title[sepRange.upperBound...])
-            let result = NSMutableAttributedString()
-            result.append(NSAttributedString(string: appName, attributes: labelAttributes(
-                font: .systemFont(ofSize: fontSize, weight: selected ? .semibold : .medium),
-                color: primary
-            )))
-            result.append(NSAttributedString(string: separator, attributes: labelAttributes(
-                font: .systemFont(ofSize: fontSize, weight: .regular),
-                color: primary.withAlphaComponent(0.32)
-            )))
-            result.append(NSAttributedString(string: windowTitle, attributes: labelAttributes(
-                font: .systemFont(ofSize: fontSize, weight: .regular),
-                color: primary.withAlphaComponent(selected ? 0.86 : 0.62)
-            )))
-            return result
-        }
-
-        return NSAttributedString(string: title, attributes: labelAttributes(
-            font: .systemFont(ofSize: fontSize, weight: selected ? .semibold : .regular),
-            color: primary
-        ))
-    }
-
     private func applyLabelStyle(_ label: NSTextField, title: String, selected: Bool, isDark: Bool) {
         label.alignment = .center
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 1
-        label.attributedStringValue = styledWindowLabel(title, selected: selected, isDark: isDark)
+        label.stringValue = title
+        label.font = .systemFont(ofSize: 11.5, weight: selected ? .semibold : .regular)
+        label.textColor = labelTextColor(selected: selected, isDark: isDark)
     }
 
     private func applySelectionStyle(to thumbnailContainer: NSView?, selected: Bool) {
@@ -842,7 +687,7 @@ class AltTabManager: NSObject {
         let maxPanelH = max(240, screen.height * 0.72)
         let availableW = max(1, maxPanelW - padding * 2)
         let availableH = max(1, maxPanelH - padding * 2)
-        let aspect = representativeAspectRatio(for: windows)
+        let aspect: CGFloat = 1.6
         let minThumbW = max(150, min(220, screen.width * 0.14))
         let maxThumbW = max(320, min(460, screen.width * 0.34))
 
@@ -897,15 +742,6 @@ class AltTabManager: NSObject {
             labelHeight: labelHeight,
             labelGap: labelGap
         )
-    }
-
-    private func representativeAspectRatio(for windows: [WindowInfo]) -> CGFloat {
-        let ratios = windows.compactMap { win -> CGFloat? in
-            guard win.bounds.width > 0, win.bounds.height > 0 else { return nil }
-            return min(2.0, max(1.15, win.bounds.width / win.bounds.height))
-        }.sorted()
-        guard !ratios.isEmpty else { return 1.6 }
-        return ratios[ratios.count / 2]
     }
 
     private func preferredScreen() -> NSScreen? {

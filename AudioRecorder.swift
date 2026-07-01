@@ -65,7 +65,6 @@ class SystemAudioRecorder: NSObject {
                 self.startTime = Date()
                 self.isRecording = true
                 AppState.shared.isRecording = true
-                AppState.shared.lastRecordingURL = url
 
                 let t = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
                     guard let start = self?.startTime else { return }

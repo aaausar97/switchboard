@@ -1,6 +1,26 @@
 import Cocoa
 import Foundation
 
+// MARK: - CLI tool discovery (menu-bar apps get a minimal PATH)
+
+enum SwitchboardTools {
+    static let homebrewSearchPaths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+
+    static func findExecutable(_ name: String) -> String? {
+        for dir in homebrewSearchPaths {
+            let path = "\(dir)/\(name)"
+            if FileManager.default.isExecutableFile(atPath: path) { return path }
+        }
+        return nil
+    }
+
+    static func augmentedPATH() -> String {
+        let extra = homebrewSearchPaths.prefix(2).joined(separator: ":")
+        let path = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        return path.isEmpty ? "\(extra):/usr/bin:/bin" : "\(extra):\(path)"
+    }
+}
+
 // MARK: - Download State
 
 enum DownloadResult {
@@ -170,12 +190,12 @@ class AudioDownloader: NSObject {
     // MARK: - yt-dlp / ffmpeg Download
 
     private func downloadWithYtDlp(url: URL, destination: URL) {
-        guard let ytDlpPath = findExecutable("yt-dlp") else {
+        guard let ytDlpPath = SwitchboardTools.findExecutable("yt-dlp") else {
             deliverResult(.failure("yt-dlp is not installed.\n\nInstall with:\n  brew install yt-dlp ffmpeg\n\nThen try again."))
             return
         }
 
-        guard let ffmpegPath = findExecutable("ffmpeg") else {
+        guard let ffmpegPath = SwitchboardTools.findExecutable("ffmpeg") else {
             deliverResult(.failure("ffmpeg is required by yt-dlp to extract audio, but it is not installed.\n\nInstall with:\n  brew install ffmpeg\n\nThen try again."))
             return
         }
@@ -281,38 +301,10 @@ class AudioDownloader: NSObject {
             .first
     }
 
-    // MARK: - Tool Discovery
-
-    private let searchPaths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
-
-    /// Menu-bar apps inherit a minimal PATH. Ensure yt-dlp subprocesses can find Homebrew tools.
     private func augmentedEnvironment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
-        let extra = searchPaths.prefix(2).joined(separator: ":")
-        if let path = env["PATH"], !path.isEmpty {
-            env["PATH"] = "\(extra):\(path)"
-        } else {
-            env["PATH"] = "\(extra):/usr/bin:/bin"
-        }
+        env["PATH"] = SwitchboardTools.augmentedPATH()
         return env
-    }
-
-    private func findExecutable(_ name: String) -> String? {
-        for dir in searchPaths {
-            let path = "\(dir)/\(name)"
-            if FileManager.default.isExecutableFile(atPath: path) { return path }
-        }
-        let which = Process()
-        which.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        which.arguments = [name]
-        let p = Pipe()
-        which.standardOutput = p
-        which.standardError = Pipe()
-        try? which.run()
-        which.waitUntilExit()
-        let out = String(data: p.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return out.isEmpty ? nil : out
     }
 
     // MARK: - Error Hinting
