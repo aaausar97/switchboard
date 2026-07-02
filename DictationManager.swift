@@ -135,9 +135,8 @@ final class DictationManager: NSObject {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: cli)
         process.arguments = ["-m", modelPath, "-f", wav.path, "-of", outBase, "-otxt", "-nt", "-l", "en"]
-        let errPipe = Pipe()
         process.standardOutput = Pipe()
-        process.standardError = errPipe
+        process.standardError = Pipe()
 
         do {
             try process.run()

@@ -15,12 +15,11 @@ struct WindowInfo {
     let windowID: CGWindowID
     let title: String, appName: String
     let bounds: CGRect
-    let pid: pid_t, alpha: Double, windowLayer: Int
+    let pid: pid_t
 }
 
 private struct AltTabLayout {
     let columns: Int
-    let rows: Int
     let thumbnailSize: CGSize
     let panelSize: CGSize
     let contentSize: CGSize
@@ -37,13 +36,13 @@ class ThumbnailCache {
     private var cache: [CGWindowID: NSImage] = [:]
     private var capturedAt: [CGWindowID: Date] = [:]
     private let maxEntries = 128
-    private let defaultMaxAge: TimeInterval = 1.25
+    private let maxAge: TimeInterval = 1.25
 
     func get(_ id: CGWindowID) -> NSImage? { cache[id] }
 
-    func isFresh(_ id: CGWindowID, maxAge: TimeInterval? = nil) -> Bool {
+    func isFresh(_ id: CGWindowID) -> Bool {
         guard let capturedAt = capturedAt[id] else { return false }
-        return Date().timeIntervalSince(capturedAt) < (maxAge ?? defaultMaxAge)
+        return Date().timeIntervalSince(capturedAt) < maxAge
     }
 
     func set(_ id: CGWindowID, image: NSImage) {
@@ -89,7 +88,7 @@ class AltTabSettings {
 class SwitchboardPermissions {
     private static var setupTimer: Timer?
     private static var alertIsShowing = false
-    private static var onReadyCallbacks: [() -> Void] = []
+    private static var onReadyCallback: (() -> Void)?
     private static var screenRecordingProbeStream: SCStream?
     private static var screenRecordingProbeHandler: ScreenRecordingProbeHandler?
 
@@ -120,7 +119,7 @@ class SwitchboardPermissions {
             return
         }
 
-        onReadyCallbacks.append(onReady)
+        onReadyCallback = onReady
         requestMissingPermissions()
         showPermissionSetupAlert()
         startPermissionPolling()
@@ -145,9 +144,9 @@ class SwitchboardPermissions {
     private static func finishPermissionSetup() {
         setupTimer?.invalidate()
         setupTimer = nil
-        let callbacks = onReadyCallbacks
-        onReadyCallbacks.removeAll()
-        callbacks.forEach { $0() }
+        let callback = onReadyCallback
+        onReadyCallback = nil
+        callback?()
         if !hasScreenRecording {
             requestScreenRecordingForThumbnails()
         }
@@ -294,6 +293,7 @@ class AltTabManager: NSObject {
     private var globalKeyMonitor: Any?
     private var permissionMonitorTimer: Timer?
     private var isHandlingPermissionLoss = false
+    private var spaceChangeWorkItem: DispatchWorkItem?
     private var optimisticallyClosingWindowIDs = Set<CGWindowID>()
     private var dismissSwitcherOnOptionRelease = false
     private var dictationSpaceHeld = false
@@ -310,12 +310,19 @@ class AltTabManager: NSObject {
             name: NSApplication.didChangeScreenParametersNotification,
             object: nil
         )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(activeSpaceChanged),
+            name: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil
+        )
     }
 
     deinit {
         captureTask?.cancel(); refreshTask?.cancel()
         teardownHotkeyMonitoring(stopPermissionMonitor: true)
         NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     func registerHotkey() {
@@ -410,7 +417,7 @@ class AltTabManager: NSObject {
                     } else {
                         DispatchQueue.main.async { manager.handleAccessibilityRevoked() }
                     }
-                    return Unmanaged.passRetained(event)
+                    return Unmanaged.passUnretained(event)
                 }
                 return manager.handleCGEvent(type: type, event: event)
             },
@@ -466,22 +473,15 @@ class AltTabManager: NSObject {
         }
     }
 
-    private func triggerOptionW() {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.isShowing else { return }
-            self.closeSelectedWindow()
-        }
-    }
-
     private func handleCGEvent(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         guard SwitchboardPermissions.hasAccessibility else {
             DispatchQueue.main.async { [weak self] in self?.handleAccessibilityRevoked() }
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
 
         if type == .mouseMoved, isShowing {
             handleSwitcherMouseMoved(at: event.location)
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
         if type == .leftMouseDown, isShowing {
             if handleSwitcherMouseDown(at: event.location) {
@@ -498,7 +498,7 @@ class AltTabManager: NSObject {
             if handleModifierFlagsChanged(optionDown: optionNow) {
                 return nil
             }
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
         if type == .keyUp {
             let kc = event.getIntegerValueField(.keyboardEventKeycode)
@@ -527,7 +527,7 @@ class AltTabManager: NSObject {
             if kc == 53, isShowing { DispatchQueue.main.async { [weak self] in self?.hideAltTab() }; return nil }
             if (kc == 36 || kc == 76), isShowing { DispatchQueue.main.async { [weak self] in self?.activateSelectedAndHide() }; return nil }
         }
-        return Unmanaged.passRetained(event)
+        return Unmanaged.passUnretained(event)
     }
 
     // MARK: - Show Panel (adaptive grid layout)
@@ -732,7 +732,6 @@ class AltTabManager: NSObject {
 
         return AltTabLayout(
             columns: bestCols,
-            rows: bestRows,
             thumbnailSize: CGSize(width: bestThumbW.rounded(.down), height: thumbH.rounded(.down)),
             panelSize: CGSize(width: panelW.rounded(.up), height: panelH.rounded(.up)),
             contentSize: CGSize(width: max(contentW, panelW).rounded(.up), height: max(contentH, panelH).rounded(.up)),
@@ -1265,6 +1264,33 @@ class AltTabManager: NSObject {
         DispatchQueue.main.async { [weak self] in self?.renderPanel(restartCapture: false) }
     }
 
+    // When the user swipes to another Space, re-fetch the window list once the transition
+    // animation has settled. The notification fires mid-swipe, before CGWindowListCopyWindowInfo
+    // reflects the new Space, so an immediate query returns stale data. Delaying ~350 ms lets
+    // both the animation finish and the window server update.
+    @objc private func activeSpaceChanged() {
+        guard isShowing else { return }
+        spaceChangeWorkItem?.cancel()
+        // Try immediately — if CGWindowList hasn't settled yet (stale IDs), retry once.
+        if !refreshWindowsForSpaceChange() {
+            let item = DispatchWorkItem { [weak self] in self?.refreshWindowsForSpaceChange() }
+            spaceChangeWorkItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: item)
+        }
+    }
+
+    @discardableResult
+    private func refreshWindowsForSpaceChange() -> Bool {
+        guard isShowing else { return true }
+        let fresh = getWindows()
+        guard !fresh.isEmpty else { hideAltTab(); return true }
+        guard Set(fresh.map(\.windowID)) != Set(windows.map(\.windowID)) else { return false }
+        windows = fresh
+        selectedIndex = 0
+        renderPanel(restartCapture: true)
+        return true
+    }
+
     // MARK: - Window Enumeration (ALL windows, no dedup)
 
     private func getWindows() -> [WindowInfo] {
@@ -1277,11 +1303,13 @@ class AltTabManager: NSObject {
                   let ly = d[kCGWindowLayer as String] as? Int,
                   let pid = d[kCGWindowOwnerPID as String] as? pid_t,
                   let own = d[kCGWindowOwnerName as String] as? String else { continue }
-            guard al > 0.01, ly <= 2, !AltTabSettings.shared.excludedAppNames.contains(own) else { continue }
+            // Real switchable windows sit at layer 0; negative layers are desktop/wallpaper/widget
+            // surfaces that transiently leak in during Space swipes and appear as ghost tiles.
+            guard al > 0.01, ly >= 0, ly <= 2, !AltTabSettings.shared.excludedAppNames.contains(own) else { continue }
             let b = CGRect(x: bd["X"] ?? 0, y: bd["Y"] ?? 0, width: bd["Width"] ?? 0, height: bd["Height"] ?? 0)
             guard b.width > 50, b.height > 50 else { continue }
             // NO dedup — show ALL windows, even same app
-            result.append(WindowInfo(windowID: wid, title: d[kCGWindowName as String] as? String ?? "", appName: own, bounds: b, pid: pid, alpha: al, windowLayer: ly))
+            result.append(WindowInfo(windowID: wid, title: d[kCGWindowName as String] as? String ?? "", appName: own, bounds: b, pid: pid))
         }
         // CGWindowList already returns windows in Z-order (frontmost first).
         // Preserving that order makes the switcher's index 0 = current window,

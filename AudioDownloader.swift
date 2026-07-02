@@ -1,4 +1,3 @@
-import Cocoa
 import Foundation
 
 // MARK: - CLI tool discovery (menu-bar apps get a minimal PATH)
