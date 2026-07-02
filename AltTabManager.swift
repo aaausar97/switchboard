@@ -1178,11 +1178,17 @@ class AltTabManager: NSObject {
 
     private func activateWindow(_ window: WindowInfo) {
         let app = NSRunningApplication(processIdentifier: window.pid)
-        app?.activate(options: [])
-        guard let axWindow = axWindow(for: window) else { return }
-        AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString)
+        guard let axWindow = axWindow(for: window) else {
+            app?.activate(options: .activateIgnoringOtherApps)
+            return
+        }
+        // Raise the specific window first (makes it frontmost in app's window stack),
+        // then set focused window, then activate. This order ensures the app comes to
+        // front showing the already-raised window rather than its own most-recent choice.
         let axApp = AXUIElementCreateApplication(window.pid)
+        AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString)
         AXUIElementSetAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, axWindow)
+        app?.activate(options: .activateIgnoringOtherApps)
     }
 
     private func requestWindowClose(_ window: WindowInfo) -> Bool {
@@ -1218,13 +1224,6 @@ class AltTabManager: NSObject {
             }
         }
 
-        if let frameMatch = axWindows.first(where: { axWindow in
-            guard let frame = axFrame(for: axWindow) else { return false }
-            return framesLikelyMatch(frame, window.bounds)
-        }) {
-            return frameMatch
-        }
-
         return axWindows.first { axWindow in
             var titleValue: CFTypeRef?
             guard !window.title.isEmpty,
@@ -1232,31 +1231,6 @@ class AltTabManager: NSObject {
                   let title = titleValue as? String else { return false }
             return title == window.title
         }
-    }
-
-    private func axFrame(for axWindow: AXUIElement) -> CGRect? {
-        var positionValue: CFTypeRef?
-        var sizeValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(axWindow, kAXPositionAttribute as CFString, &positionValue) == .success,
-              AXUIElementCopyAttributeValue(axWindow, kAXSizeAttribute as CFString, &sizeValue) == .success,
-              let positionValue,
-              let sizeValue else { return nil }
-
-        let positionAXValue = positionValue as! AXValue
-        let sizeAXValue = sizeValue as! AXValue
-        var position = CGPoint.zero
-        var size = CGSize.zero
-        guard AXValueGetValue(positionAXValue, .cgPoint, &position),
-              AXValueGetValue(sizeAXValue, .cgSize, &size) else { return nil }
-
-        return CGRect(origin: position, size: size)
-    }
-
-    private func framesLikelyMatch(_ axFrame: CGRect, _ cgFrame: CGRect) -> Bool {
-        let tolerance: CGFloat = 36
-        let originMatches = abs(axFrame.minX - cgFrame.minX) <= tolerance && abs(axFrame.minY - cgFrame.minY) <= tolerance
-        let sizeMatches = abs(axFrame.width - cgFrame.width) <= tolerance && abs(axFrame.height - cgFrame.height) <= tolerance
-        return originMatches && sizeMatches
     }
 
     @objc private func screenParametersChanged() {
