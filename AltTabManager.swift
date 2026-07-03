@@ -294,6 +294,7 @@ class AltTabManager: NSObject {
     private var permissionMonitorTimer: Timer?
     private var isHandlingPermissionLoss = false
     private var spaceChangeWorkItem: DispatchWorkItem?
+    private var spaceChangePreviousWindowIDs: Set<CGWindowID> = []
     private var optimisticallyClosingWindowIDs = Set<CGWindowID>()
     private var dismissSwitcherOnOptionRelease = false
     private var dictationSpaceHeld = false
@@ -550,6 +551,10 @@ class AltTabManager: NSObject {
 
     @discardableResult
     private func handleModifierFlagsChanged(optionDown: Bool) -> Bool {
+        if !optionDown {
+            spaceChangeWorkItem?.cancel()
+            spaceChangeWorkItem = nil
+        }
         if isShowing && !optionDown && (dismissSwitcherOnOptionRelease || optionKeyHeld) {
             dismissSwitcherOnOptionRelease = false
             optionKeyHeld = false
@@ -558,6 +563,10 @@ class AltTabManager: NSObject {
         }
         optionKeyHeld = optionDown
         return false
+    }
+
+    private var isOptionPhysicallyDown: Bool {
+        CGEventSource.flagsState(.hidSystemState).contains(.maskAlternate)
     }
 
     private func renderPanel(restartCapture: Bool, animated: Bool = false) {
@@ -575,7 +584,9 @@ class AltTabManager: NSObject {
             styleMask: [.nonactivatingPanel, .fullSizeContentView], backing: .buffered, defer: false)
         if altTabPanel == nil {
             panel.level = .screenSaver
-            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            // Stay on the active Space only — canJoinAllSpaces made the panel visible
+            // on every desktop during swipes, causing flash/duplicate artifacts.
+            panel.collectionBehavior = [.fullScreenAuxiliary, .moveToActiveSpace]
             panel.titlebarAppearsTransparent = true; panel.titleVisibility = .hidden
             panel.isMovableByWindowBackground = false; panel.hidesOnDeactivate = false
             panel.ignoresMouseEvents = false
@@ -1011,7 +1022,7 @@ class AltTabManager: NSObject {
         optimisticallyRemoveWindow(at: closedIndex, windowID: window.windowID)
         if isShowing {
             dismissSwitcherOnOptionRelease = true
-            optionKeyHeld = CGEventSource.flagsState(.hidSystemState).contains(.maskAlternate)
+            optionKeyHeld = isOptionPhysicallyDown
         }
         confirmWindowClosed(window, closedAtIndex: closedIndex)
     }
@@ -1168,6 +1179,8 @@ class AltTabManager: NSObject {
     func hideAltTab(keepPendingCloseTracking: Bool = false) {
         isShowing = false; captureTask?.cancel(); captureTask = nil
         refreshTask?.cancel(); refreshTask = nil
+        spaceChangeWorkItem?.cancel(); spaceChangeWorkItem = nil
+        spaceChangePreviousWindowIDs.removeAll()
         dismissSwitcherOnOptionRelease = false
         if !keepPendingCloseTracking {
             optimisticallyClosingWindowIDs.removeAll()
@@ -1238,31 +1251,62 @@ class AltTabManager: NSObject {
         DispatchQueue.main.async { [weak self] in self?.renderPanel(restartCapture: false) }
     }
 
-    // When the user swipes to another Space, re-fetch the window list once the transition
-    // animation has settled. The notification fires mid-swipe, before CGWindowListCopyWindowInfo
-    // reflects the new Space, so an immediate query returns stale data. Delaying ~350 ms lets
-    // both the animation finish and the window server update.
+    // On Space change: drop option state and hide during the animation, then rebuild
+    // on the new desktop only if Option is still physically held.
     @objc private func activeSpaceChanged() {
         guard isShowing else { return }
         spaceChangeWorkItem?.cancel()
-        // Try immediately — if CGWindowList hasn't settled yet (stale IDs), retry once.
-        if !refreshWindowsForSpaceChange() {
-            let item = DispatchWorkItem { [weak self] in self?.refreshWindowsForSpaceChange() }
-            spaceChangeWorkItem = item
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: item)
+        spaceChangePreviousWindowIDs = Set(windows.map(\.windowID))
+        optionKeyHeld = false
+        dismissSwitcherOnOptionRelease = false
+        isShowing = false
+        captureTask?.cancel(); captureTask = nil
+        refreshTask?.cancel(); refreshTask = nil
+        altTabPanel?.orderOut(nil); altTabPanel = nil
+        thumbnailViews.removeAll(); thumbnailViewsByWindowID.removeAll()
+        labelViews.removeAll(); tileViews.removeAll()
+
+        DispatchQueue.main.async { [weak self] in
+            self?.finishSpaceChangeIfOptionStillHeld(attempt: 0)
         }
     }
 
-    @discardableResult
-    private func refreshWindowsForSpaceChange() -> Bool {
-        guard isShowing else { return true }
+    private func scheduleSpaceChangeRetry(attempt: Int) {
+        guard attempt < 2 else { return }
+        let item = DispatchWorkItem { [weak self] in
+            self?.finishSpaceChangeIfOptionStillHeld(attempt: attempt + 1)
+        }
+        spaceChangeWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + (attempt == 0 ? 0.04 : 0.07), execute: item)
+    }
+
+    private func finishSpaceChangeIfOptionStillHeld(attempt: Int = 0) {
+        spaceChangeWorkItem = nil
+        guard isOptionPhysicallyDown else {
+            optionKeyHeld = false
+            return
+        }
         let fresh = getWindows()
-        guard !fresh.isEmpty else { hideAltTab(); return true }
-        guard Set(fresh.map(\.windowID)) != Set(windows.map(\.windowID)) else { return false }
+        let freshIDs = Set(fresh.map(\.windowID))
+        if fresh.isEmpty {
+            if attempt < 2 { scheduleSpaceChangeRetry(attempt: attempt) }
+            return
+        }
+        if freshIDs == spaceChangePreviousWindowIDs {
+            if attempt < 2 { scheduleSpaceChangeRetry(attempt: attempt) }
+            return
+        }
         windows = fresh
+        optionKeyHeld = true
         selectedIndex = 0
-        renderPanel(restartCapture: true)
-        return true
+        isShowing = true
+        renderPanel(restartCapture: false)
+        if SwitchboardPermissions.hasScreenRecording {
+            let screen = preferredScreen()?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+            let layout = computeLayout(for: windows, in: screen)
+            captureThumbnails(thumbW: layout.thumbnailSize.width, thumbH: layout.thumbnailSize.height)
+            startBackgroundRefresh(thumbW: layout.thumbnailSize.width, thumbH: layout.thumbnailSize.height)
+        }
     }
 
     // MARK: - Window Enumeration (ALL windows, no dedup)
