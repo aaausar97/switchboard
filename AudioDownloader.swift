@@ -345,7 +345,12 @@ class AudioDownloader: NSObject {
             return "This content is blocked or unavailable in your region."
         }
         // HTTP-level errors — match only the exact HTTP status strings, not loose "not found".
+        // YouTube 403s are almost always a stale player client, not auth.
         if lower.contains("http error 403") || lower.contains("403 forbidden") {
+            let host = url.host?.lowercased() ?? ""
+            if host.contains("youtube") || host.contains("youtu.be") {
+                return "YouTube blocked this download (HTTP 403). This usually means yt-dlp is out of date.\n\nRun:\n  brew upgrade yt-dlp\n\nThen try again."
+            }
             return "Access denied (HTTP 403). The content may require authentication."
         }
         if lower.contains("http error 404") || lower.contains("404 not found") {
