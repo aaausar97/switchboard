@@ -493,6 +493,9 @@ class AltTabManager: NSObject {
             let optionNow = event.flags.contains(.maskAlternate)
             if !optionNow, dictationSpaceHeld {
                 dictationSpaceHeld = false
+                // This flag is for the switcher chord. Leaving it set made a later
+                // Space, with Option already up, start dictation.
+                optionKeyHeld = false
                 DispatchQueue.main.async { [weak self] in self?.onOptionReleasedDuringDictation?() }
                 return nil
             }
@@ -511,11 +514,16 @@ class AltTabManager: NSObject {
         }
         if type == .keyDown {
             let kc = event.getIntegerValueField(.keyboardEventKeycode)
-            let optionDown = event.flags.contains(.maskAlternate) || optionKeyHeld
+            let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+            // optionKeyHeld stays true across the switcher. Dictation has to follow
+            // the key that is actually down, or Space alone opens the pill.
+            let optionDown = event.flags.contains(.maskAlternate) || isOptionPhysicallyDown
             if !isShowing, optionDown, kc == 49 {
-                dictationSpaceHeld = true
-                DispatchQueue.main.async { [weak self] in self?.onOptionSpaceDown?() }
-                return nil
+                if !dictationSpaceHeld, !isRepeat {
+                    dictationSpaceHeld = true
+                    DispatchQueue.main.async { [weak self] in self?.onOptionSpaceDown?() }
+                }
+                if dictationSpaceHeld { return nil }
             }
             if optionDown && kc == 48 {
                 triggerOptionTab()
@@ -1237,13 +1245,85 @@ class AltTabManager: NSObject {
             }
         }
 
-        return axWindows.first { axWindow in
-            var titleValue: CFTypeRef?
-            guard !window.title.isEmpty,
-                  AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &titleValue) == .success,
-                  let title = titleValue as? String else { return false }
-            return title == window.title
+        // Mail, Notes, and other document apps often omit AXWindowNumber.
+        // AXPosition is already in kCGWindowBounds space (menu-bar display, top-left, Y down).
+        // Minimized windows keep a stale frame, so they are left out of the fallbacks.
+        let candidates = axWindows.filter { !isMinimized($0) }
+
+        if let frameMatch = closestAxWindow(matching: window.bounds, in: candidates) {
+            return frameMatch
         }
+
+        if !window.title.isEmpty {
+            let titleMatches = candidates.filter { axWindow in
+                var titleValue: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(axWindow, kAXTitleAttribute as CFString, &titleValue) == .success,
+                      let title = titleValue as? String else { return false }
+                return title == window.title
+            }
+            if titleMatches.count == 1 { return titleMatches[0] }
+        }
+
+        return nil
+    }
+
+    private func closestAxWindow(matching cgBounds: CGRect, in axWindows: [AXUIElement]) -> AXUIElement? {
+        let tolerance: CGFloat = 28
+        // Cascaded windows sit about a title-bar apart. If two candidates are
+        // nearly equidistant, guessing raises the wrong one.
+        let ambiguityGap: CGFloat = 12
+        var ranked: [(window: AXUIElement, distance: CGFloat)] = []
+        for axWindow in axWindows {
+            guard let frame = axFrame(for: axWindow), framesLikelyMatch(frame, cgBounds, tolerance: tolerance) else { continue }
+            ranked.append((axWindow, frameDistance(frame, cgBounds)))
+        }
+        ranked.sort { $0.distance < $1.distance }
+        guard let best = ranked.first else { return nil }
+        if ranked.count > 1, ranked[1].distance - best.distance < ambiguityGap {
+            return nil
+        }
+        return best.window
+    }
+
+    private func isMinimized(_ axWindow: AXUIElement) -> Bool {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axWindow, kAXMinimizedAttribute as CFString, &value) == .success,
+              let flag = value as? NSNumber else { return false }
+        return flag.boolValue
+    }
+
+    private func axFrame(for axWindow: AXUIElement) -> CGRect? {
+        guard let positionValue = axValue(axWindow, kAXPositionAttribute),
+              let sizeValue = axValue(axWindow, kAXSizeAttribute),
+              AXValueGetType(positionValue) == .cgPoint,
+              AXValueGetType(sizeValue) == .cgSize else { return nil }
+
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(positionValue, .cgPoint, &position),
+              AXValueGetValue(sizeValue, .cgSize, &size),
+              size.width > 0, size.height > 0 else { return nil }
+
+        return CGRect(origin: position, size: size)
+    }
+
+    private func axValue(_ element: AXUIElement, _ attribute: String) -> AXValue? {
+        var raw: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &raw) == .success,
+              let raw, CFGetTypeID(raw) == AXValueGetTypeID() else { return nil }
+        return (raw as! AXValue)
+    }
+
+    private func framesLikelyMatch(_ axFrame: CGRect, _ cgFrame: CGRect, tolerance: CGFloat) -> Bool {
+        let originMatches = abs(axFrame.minX - cgFrame.minX) <= tolerance && abs(axFrame.minY - cgFrame.minY) <= tolerance
+        let sizeMatches = abs(axFrame.width - cgFrame.width) <= tolerance && abs(axFrame.height - cgFrame.height) <= tolerance
+        return originMatches && sizeMatches
+    }
+
+    private func frameDistance(_ lhs: CGRect, _ rhs: CGRect) -> CGFloat {
+        let lhsCenter = CGPoint(x: lhs.midX, y: lhs.midY)
+        let rhsCenter = CGPoint(x: rhs.midX, y: rhs.midY)
+        return hypot(lhsCenter.x - rhsCenter.x, lhsCenter.y - rhsCenter.y)
     }
 
     @objc private func screenParametersChanged() {

@@ -193,6 +193,7 @@ final class DictationManager: NSObject {
 
 private final class DictationOverlay {
     private enum Mode { case listening, transcribing }
+    private enum Presentation { case icon(Mode), message(String) }
 
     private var panel: NSPanel?
     private var effectView: NSVisualEffectView?
@@ -200,6 +201,8 @@ private final class DictationOverlay {
     private var label: NSTextField?
     private var dot: NSView?
     private var flashTimer: Timer?
+    private var presentation: Presentation?
+    private var observers: [NSObjectProtocol] = []
 
     private let dotSize: CGFloat = 8
     private let iconSize: CGFloat = 17
@@ -208,39 +211,80 @@ private final class DictationOverlay {
     private let pillH: CGFloat = 38
     private let font = NSFont.systemFont(ofSize: 12, weight: .medium)
 
+    init() {
+        let remount: (Notification) -> Void = { [weak self] _ in self?.remountIfNeeded() }
+        observers.append(NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main, using: remount))
+        observers.append(NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main, using: remount))
+    }
+
+    deinit {
+        for observer in observers {
+            NotificationCenter.default.removeObserver(observer)
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+    }
+
     func showListening() { show(.listening) }
     func showTranscribing() { show(.transcribing) }
 
     func flash(_ text: String) {
         DispatchQueue.main.async { [self] in
-            let p = panel ?? makePanel()
-            panel = p
-            layoutMessage(text)
-            p.orderFrontRegardless()
-            flashTimer?.invalidate()
-            flashTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
-                self?.hide()
-            }
+            self.present(.message(text))
+            let timer = Timer(timeInterval: 2.0, repeats: false) { [weak self] _ in self?.hide() }
+            RunLoop.main.add(timer, forMode: .common)
+            self.flashTimer = timer
         }
     }
 
     func hide() {
         DispatchQueue.main.async { [self] in
-            flashTimer?.invalidate()
-            flashTimer = nil
-            panel?.orderOut(nil)
+            self.flashTimer?.invalidate()
+            self.flashTimer = nil
+            self.presentation = nil
+            self.discardPanel()
         }
     }
 
     private func show(_ mode: Mode) {
         DispatchQueue.main.async { [self] in
+            self.present(.icon(mode))
+        }
+    }
+
+    /// A panel kept for the life of a menu-bar app stops appearing: NSPanel hides
+    /// on deactivate, and an ordered-out window's layers are purged after sleep.
+    /// Build a new one whenever the indicator should be on screen.
+    private func present(_ presentation: Presentation, keepFlashTimer: Bool = false) {
+        if !keepFlashTimer {
             flashTimer?.invalidate()
             flashTimer = nil
-            let p = panel ?? makePanel()
-            panel = p
-            layoutIcon(mode)
-            p.orderFrontRegardless()
         }
+        self.presentation = presentation
+        discardPanel()
+        let p = makePanel()
+        panel = p
+        switch presentation {
+        case .icon(let mode): layoutIcon(mode)
+        case .message(let text): layoutMessage(text)
+        }
+        p.orderFrontRegardless()
+        p.display()
+    }
+
+    private func remountIfNeeded() {
+        guard let presentation else { return }
+        present(presentation, keepFlashTimer: true)
+    }
+
+    private func discardPanel() {
+        panel?.orderOut(nil)
+        panel = nil
+        effectView = nil
+        iconView = nil
+        label = nil
+        dot = nil
     }
 
     private func layoutIcon(_ mode: Mode) {
@@ -255,7 +299,9 @@ private final class DictationOverlay {
         iconView.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
             .withSymbolConfiguration(config)
         iconView.contentTintColor = .labelColor
+        iconView.needsDisplay = true
         dot.layer?.backgroundColor = (mode == .listening ? NSColor.systemRed : NSColor.systemYellow).cgColor
+        dot.needsDisplay = true
 
         placePill(width: pillW, height: pillH, on: p, effect: effect)
 
@@ -303,8 +349,11 @@ private final class DictationOverlay {
     private func makePanel() -> NSPanel {
         let p = NSPanel(contentRect: .zero, styleMask: [.nonactivatingPanel, .fullSizeContentView],
                         backing: .buffered, defer: false)
-        p.level = .screenSaver
-        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        p.level = .popUpMenu
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        p.hidesOnDeactivate = false
+        p.isReleasedWhenClosed = false
+        p.appearance = NSApp.effectiveAppearance
         p.isOpaque = false
         p.backgroundColor = .clear
         p.hasShadow = true
