@@ -1391,6 +1391,11 @@ class AltTabManager: NSObject {
 
     // MARK: - Window Enumeration (ALL windows, no dedup)
 
+    static func isWindowOwnerExcluded(ownerName: String, bundleIdentifier: String?, excludedAppNames: Set<String>) -> Bool {
+        // Built-in helper exclusion must not depend on saved names or the driver's display name.
+        bundleIdentifier == "com.trycua.driver" || excludedAppNames.contains(ownerName)
+    }
+
     private func getWindows() -> [WindowInfo] {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return [] }
         var result: [WindowInfo] = []
@@ -1403,9 +1408,11 @@ class AltTabManager: NSObject {
                   let own = d[kCGWindowOwnerName as String] as? String else { continue }
             // Real switchable windows sit at layer 0; negative layers are desktop/wallpaper/widget
             // surfaces that transiently leak in during Space swipes and appear as ghost tiles.
-            guard al > 0.01, ly >= 0, ly <= 2, !AltTabSettings.shared.excludedAppNames.contains(own) else { continue }
+            guard al > 0.01, ly >= 0, ly <= 2 else { continue }
             let b = CGRect(x: bd["X"] ?? 0, y: bd["Y"] ?? 0, width: bd["Width"] ?? 0, height: bd["Height"] ?? 0)
             guard b.width > 50, b.height > 50 else { continue }
+            let bundleIdentifier = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+            guard !Self.isWindowOwnerExcluded(ownerName: own, bundleIdentifier: bundleIdentifier, excludedAppNames: AltTabSettings.shared.excludedAppNames) else { continue }
             // NO dedup — show ALL windows, even same app
             result.append(WindowInfo(windowID: wid, title: d[kCGWindowName as String] as? String ?? "", appName: own, bounds: b, pid: pid))
         }
